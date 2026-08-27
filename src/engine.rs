@@ -5,31 +5,39 @@ use crate::model::{
 use anyhow::{Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use ignore::WalkBuilder;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_LOCK_VIOLATION, ERROR_OPERATION_ABORTED, ERROR_PATH_NOT_FOUND,
-    ERROR_REQUEST_ABORTED, ERROR_SHARING_VIOLATION, GetLastError, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_HANDLE_EOF, ERROR_INVALID_FUNCTION, ERROR_LOCK_VIOLATION, ERROR_MORE_DATA,
+    ERROR_NOT_SUPPORTED, ERROR_OPERATION_ABORTED, ERROR_PATH_NOT_FOUND, ERROR_REQUEST_ABORTED,
+    ERROR_SHARING_VIOLATION, FILETIME, GetLastError, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, COPY_FILE_ALLOW_DECRYPTED_DESTINATION, COPY_FILE_FAIL_IF_EXISTS,
-    COPY_FILE_NO_BUFFERING, CopyFileExW, CreateFileW, CreateHardLinkW, CreateSymbolicLinkW,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileAttributeTagInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, OPEN_EXISTING,
-    PROGRESS_CANCEL, PROGRESS_CONTINUE, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
-    SYMBOLIC_LINK_FLAG_DIRECTORY,
+    COPY_FILE_NO_BUFFERING, CREATE_NEW, CopyFileExW, CreateFileW, CreateHardLinkW,
+    CreateSymbolicLinkW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_SPARSE_FILE, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_BEGIN, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FileAttributeTagInfo, GetFileAttributesW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileSizeEx, GetFileTime, INVALID_FILE_ATTRIBUTES,
+    OPEN_EXISTING, PROGRESS_CANCEL, PROGRESS_CONTINUE, ReadFile, SetEndOfFile, SetFileAttributesW,
+    SetFilePointerEx, SetFileTime, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+    SYMBOLIC_LINK_FLAG_DIRECTORY, WriteFile,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
+use windows_sys::Win32::System::Ioctl::{
+    FILE_ALLOCATED_RANGE_BUFFER, FSCTL_QUERY_ALLOCATED_RANGES, FSCTL_SET_SPARSE,
+};
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -59,6 +67,7 @@ pub enum EngineEvent {
     Finished {
         cancelled: bool,
         error_count: usize,
+        skip_count: usize,
     },
 }
 
@@ -224,6 +233,7 @@ pub fn start(request: TaskRequest) -> EngineHandle {
             let _ = sender.send(EngineEvent::Finished {
                 cancelled: worker_control.cancelled.load(Ordering::Acquire),
                 error_count: 1,
+                skip_count: 0,
             });
         }
     });
@@ -235,6 +245,12 @@ fn run_task(
     sender: &Sender<EngineEvent>,
     control: &Arc<Control>,
 ) -> Result<()> {
+    if matches!(
+        request.kind,
+        OperationKind::CopyAsSymlink | OperationKind::CopyAsHardlink
+    ) {
+        return run_create_links(request, sender, control);
+    }
     if !request.retry_items.is_empty() {
         return run_retry(request, sender, control);
     }
@@ -249,6 +265,7 @@ fn run_task(
         sender.send(EngineEvent::Finished {
             cancelled: true,
             error_count: 0,
+            skip_count: 0,
         })?;
         return Ok(());
     }
@@ -260,6 +277,7 @@ fn run_task(
     })?;
 
     let mut error_count = 0;
+    let mut skip_count = 0;
     let mut remaining_plans = Vec::new();
     for plan in plans {
         if !control.wait() {
@@ -307,7 +325,9 @@ fn run_task(
         }
     }
 
-    error_count += run_file_workers(files, request, sender, control);
+    let (file_errors, file_skips) = run_file_workers(files, request, sender, control);
+    error_count += file_errors;
+    skip_count += file_skips;
     error_count += create_link_jobs(links, request, sender, control);
 
     if request.kind == OperationKind::Move && !control.cancelled.load(Ordering::Acquire) {
@@ -332,8 +352,311 @@ fn run_task(
     sender.send(EngineEvent::Finished {
         cancelled: control.cancelled.load(Ordering::Acquire),
         error_count,
+        skip_count,
     })?;
     Ok(())
+}
+
+fn run_create_links(
+    request: &TaskRequest,
+    sender: &Sender<EngineEvent>,
+    control: &Arc<Control>,
+) -> Result<()> {
+    let t = strings(request);
+    let as_symlink = request.kind == OperationKind::CopyAsSymlink;
+    let jobs = if request.retry_items.is_empty() {
+        validate_request(request)?;
+        let dest_root = request.destination.as_ref().unwrap();
+        let mut jobs = Vec::new();
+        let mut taken = HashSet::new();
+        for source in &request.sources {
+            let Some(name) = source.file_name() else {
+                continue;
+            };
+            let target = numbered_link_path(
+                &dest_root.join(name),
+                is_directory_nofollow(source),
+                &taken,
+            );
+            taken.insert(target.clone());
+            jobs.push((source.clone(), target));
+        }
+        jobs
+    } else {
+        request
+            .retry_items
+            .iter()
+            .filter_map(|item| Some((item.source.clone(), item.target.clone()?)))
+            .collect()
+    };
+    if jobs.is_empty() {
+        sender.send(EngineEvent::Started {
+            total_bytes: 0,
+            total_items: 0,
+        })?;
+        sender.send(EngineEvent::Finished {
+            cancelled: control.cancelled.load(Ordering::Acquire),
+            error_count: 0,
+            skip_count: 0,
+        })?;
+        return Ok(());
+    }
+
+    let mut total_items = 0u64;
+    for (source, _) in &jobs {
+        if !control.wait() {
+            sender.send(EngineEvent::Finished {
+                cancelled: true,
+                error_count: 0,
+                skip_count: 0,
+            })?;
+            return Ok(());
+        }
+        total_items += if as_symlink {
+            1
+        } else {
+            count_hardlink_items(source)
+        };
+        sender.send(EngineEvent::Scanning {
+            total_bytes: 0,
+            total_items,
+            current: source.clone(),
+        })?;
+    }
+    sender.send(EngineEvent::Started {
+        total_bytes: 0,
+        total_items,
+    })?;
+
+    let mut error_count = 0;
+    for (source, dest) in jobs {
+        if !control.wait() {
+            break;
+        }
+        sender.send(EngineEvent::Current(source.clone()))?;
+        let result = if as_symlink {
+            paste_as_symlink(&source, &dest, sender)
+        } else {
+            paste_as_hardlink(&source, &dest, request, sender, control)
+        };
+        match result {
+            Ok(errors) => error_count += errors,
+            Err(error) => {
+                error_count += 1;
+                send_failed(
+                    sender,
+                    RetryItem {
+                        source: source.clone(),
+                        target: Some(dest.clone()),
+                        delete_source: false,
+                    },
+                    t.cannot_create_link(&dest, &error),
+                );
+            }
+        }
+    }
+    sender.send(EngineEvent::Finished {
+        cancelled: control.cancelled.load(Ordering::Acquire),
+        error_count,
+        skip_count: 0,
+    })?;
+    Ok(())
+}
+
+fn numbered_link_path(path: &Path, as_directory: bool, taken: &HashSet<PathBuf>) -> PathBuf {
+    let available = |candidate: &Path| !path_exists(candidate) && !taken.contains(candidate);
+    if available(path) {
+        return path.to_path_buf();
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file");
+    let (base, suffix) = if as_directory {
+        (file_name.to_owned(), String::new())
+    } else if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(file_name);
+        (stem.to_owned(), format!(".{extension}"))
+    } else {
+        (file_name.to_owned(), String::new())
+    };
+    for index in 2..=u32::MAX {
+        let candidate = parent.join(format!("{base} {index}{suffix}"));
+        if available(&candidate) {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
+}
+
+fn paste_as_symlink(source: &Path, dest: &Path, sender: &Sender<EngineEvent>) -> Result<usize> {
+    let is_dir = is_directory_nofollow(source);
+    let target = absolute_link_target(source);
+    create_symbolic_link(dest, &target, is_dir)?;
+    sender.send(EngineEvent::ItemsDone(1))?;
+    Ok(0)
+}
+
+fn paste_as_hardlink(
+    source: &Path,
+    dest: &Path,
+    request: &TaskRequest,
+    sender: &Sender<EngineEvent>,
+    control: &Arc<Control>,
+) -> Result<usize> {
+    let t = strings(request);
+    if is_directory_nofollow(source) && is_reparse_path(source) {
+        bail!("cannot hardlink a reparse directory");
+    }
+    if !is_directory_nofollow(source) {
+        if !same_volume(source, dest) {
+            bail!("CreateHardLinkW requires the same volume");
+        }
+        create_hard_link(dest, source)?;
+        sender.send(EngineEvent::ItemsDone(1))?;
+        return Ok(0);
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if path_exists(dest) {
+        if !is_directory_nofollow(dest) {
+            fs::remove_file(dest)?;
+            fs::create_dir_all(dest)?;
+        }
+    } else {
+        fs::create_dir_all(dest)?;
+    }
+    sender.send(EngineEvent::ItemsDone(1))?;
+    let empty_taken = HashSet::new();
+    let mut errors = 0;
+    let walker = WalkDir::new(source)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.depth() == 0 || !(entry.file_type().is_dir() && is_reparse_path(entry.path()))
+        });
+    for entry in walker.filter_map(Result::ok) {
+        if !control.wait() {
+            break;
+        }
+        if entry.depth() == 0 {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(source) else {
+            continue;
+        };
+        let mut dest_path = dest.join(relative);
+        sender.send(EngineEvent::Current(entry.path().to_path_buf()))?;
+        if entry.file_type().is_dir() {
+            if let Err(error) = fs::create_dir_all(&dest_path) {
+                errors += 1;
+                send_failed(
+                    sender,
+                    RetryItem {
+                        source: entry.path().to_path_buf(),
+                        target: Some(dest_path),
+                        delete_source: false,
+                    },
+                    t.cannot_create_dir(entry.path(), &error),
+                );
+                continue;
+            }
+            sender.send(EngineEvent::ItemsDone(1))?;
+            continue;
+        }
+        dest_path = numbered_link_path(&dest_path, false, &empty_taken);
+        if !same_volume(entry.path(), &dest_path) {
+            errors += 1;
+            send_failed(
+                sender,
+                RetryItem {
+                    source: entry.path().to_path_buf(),
+                    target: Some(dest_path.clone()),
+                    delete_source: false,
+                },
+                t.cannot_create_link(&dest_path, &"CreateHardLinkW requires the same volume"),
+            );
+            continue;
+        }
+        match create_hard_link(&dest_path, entry.path()) {
+            Ok(()) => {
+                sender.send(EngineEvent::ItemsDone(1))?;
+            }
+            Err(error) => {
+                errors += 1;
+                send_failed(
+                    sender,
+                    RetryItem {
+                        source: entry.path().to_path_buf(),
+                        target: Some(dest_path.clone()),
+                        delete_source: false,
+                    },
+                    t.cannot_create_link(&dest_path, &error),
+                );
+            }
+        }
+    }
+    Ok(errors)
+}
+
+fn count_hardlink_items(source: &Path) -> u64 {
+    if !is_directory_nofollow(source) || is_reparse_path(source) {
+        return 1;
+    }
+    WalkDir::new(source)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.depth() == 0 || !(entry.file_type().is_dir() && is_reparse_path(entry.path()))
+        })
+        .filter_map(Result::ok)
+        .count()
+        .max(1) as u64
+}
+
+fn path_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn is_directory_nofollow(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0)
+        .unwrap_or(false)
+}
+
+fn is_reparse_path(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        .unwrap_or(false)
+}
+
+fn absolute_link_target(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    });
+    strip_extended_prefix(canonical)
+}
+
+fn strip_extended_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest.to_string())
+    } else {
+        path
+    }
 }
 
 fn run_retry(
@@ -381,13 +704,15 @@ fn run_retry(
         sender.send(EngineEvent::Finished {
             cancelled: false,
             error_count: 1,
+            skip_count: 0,
         })?;
         return Ok(());
     }
-    let error_count = run_file_workers(files, request, sender, control);
+    let (error_count, skip_count) = run_file_workers(files, request, sender, control);
     sender.send(EngineEvent::Finished {
         cancelled: control.cancelled.load(Ordering::Acquire),
         error_count,
+        skip_count,
     })?;
     Ok(())
 }
@@ -531,7 +856,7 @@ fn run_file_workers(
     request: &TaskRequest,
     sender: &Sender<EngineEvent>,
     control: &Arc<Control>,
-) -> usize {
+) -> (usize, usize) {
     let mut small = Vec::new();
     let mut large = Vec::new();
     for file in files {
@@ -541,7 +866,8 @@ fn run_file_workers(
             small.push(file);
         }
     }
-    let errors = Arc::new(Mutex::new(0usize));
+    let errors = Arc::new(AtomicUsize::new(0));
+    let skips = Arc::new(AtomicUsize::new(0));
     thread::scope(|scope| {
         if !small.is_empty() {
             spawn_copy_workers(
@@ -553,13 +879,27 @@ fn run_file_workers(
                 sender,
                 control,
                 &errors,
+                &skips,
             );
         }
         if !large.is_empty() {
-            spawn_copy_workers(scope, large, 1, true, request, sender, control, &errors);
+            spawn_copy_workers(
+                scope,
+                large,
+                1,
+                true,
+                request,
+                sender,
+                control,
+                &errors,
+                &skips,
+            );
         }
     });
-    *errors.lock().expect("error mutex poisoned")
+    (
+        errors.load(Ordering::Relaxed),
+        skips.load(Ordering::Relaxed),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -571,7 +911,8 @@ fn spawn_copy_workers<'scope>(
     request: &'scope TaskRequest,
     sender: &'scope Sender<EngineEvent>,
     control: &'scope Arc<Control>,
-    errors: &'scope Arc<Mutex<usize>>,
+    errors: &'scope Arc<AtomicUsize>,
+    skips: &'scope Arc<AtomicUsize>,
 ) {
     let (work_sender, work_receiver) = unbounded::<FileWork>();
     for work in files {
@@ -585,6 +926,7 @@ fn spawn_copy_workers<'scope>(
         let event_sender = sender.clone();
         let worker_control = Arc::clone(control);
         let errors = Arc::clone(errors);
+        let skips = Arc::clone(skips);
         let conflict_policy = request.settings.conflict_policy;
         let verify_size = request.settings.verify_file_size;
         let skip_unchanged = request.settings.skip_unchanged;
@@ -609,7 +951,7 @@ fn spawn_copy_workers<'scope>(
                         if work.delete_source
                             && let Err(error) = fs::remove_file(&work.source)
                         {
-                            *errors.lock().expect("error mutex poisoned") += 1;
+                            errors.fetch_add(1, Ordering::Relaxed);
                             send_failed(
                                 &event_sender,
                                 RetryItem {
@@ -623,6 +965,7 @@ fn spawn_copy_workers<'scope>(
                         let _ = event_sender.send(EngineEvent::ItemsDone(1));
                     }
                     Ok(CopyOutcome::Skipped) => {
+                        skips.fetch_add(1, Ordering::Relaxed);
                         let _ = event_sender.send(EngineEvent::BytesDone(work.size));
                         let _ = event_sender.send(EngineEvent::ItemsDone(1));
                     }
@@ -632,7 +975,7 @@ fn spawn_copy_workers<'scope>(
                         {
                             break;
                         }
-                        *errors.lock().expect("error mutex poisoned") += 1;
+                        errors.fetch_add(1, Ordering::Relaxed);
                         let message = if is_lock_error(&error) {
                             t.file_locked(&work.source)
                         } else {
@@ -787,6 +1130,22 @@ fn copy_file_os(
     sender: &Sender<EngineEvent>,
     control: &Arc<Control>,
 ) -> Result<()> {
+    if is_sparse_file(source) {
+        match copy_sparse_file(source, target, expected_size, strings, sender, control) {
+            Ok(()) => return Ok(()),
+            Err(error) if os_error_code(&error) == Some(ERROR_PATH_NOT_FOUND) => {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                copy_sparse_file(source, target, expected_size, strings, sender, control)?;
+                return Ok(());
+            }
+            Err(error) if sparse_unsupported(&error) => {
+                let _ = fs::remove_file(target);
+            }
+            Err(error) => return Err(error),
+        }
+    }
     let mut flags = COPY_FILE_ALLOW_DECRYPTED_DESTINATION | COPY_FILE_FAIL_IF_EXISTS;
     if unbuffered {
         flags |= COPY_FILE_NO_BUFFERING;
@@ -828,6 +1187,308 @@ fn copy_file_os(
         }
         Err(error) => Err(error),
     }
+}
+
+fn is_sparse_file(path: &Path) -> bool {
+    let wide = path_to_wide(path);
+    let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    attributes != INVALID_FILE_ATTRIBUTES && attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0
+}
+
+fn sparse_unsupported(error: &anyhow::Error) -> bool {
+    matches!(
+        os_error_code(error),
+        Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED)
+    )
+}
+
+struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if self.0 != INVALID_HANDLE_VALUE {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+fn open_file(
+    path: &Path,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    flags: u32,
+) -> Result<OwnedHandle> {
+    let wide = path_to_wide(path);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            share,
+            std::ptr::null(),
+            disposition,
+            flags,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::from_raw_os_error(unsafe { GetLastError() } as i32).into());
+    }
+    Ok(OwnedHandle(handle))
+}
+
+fn last_os_error() -> anyhow::Error {
+    std::io::Error::from_raw_os_error(unsafe { GetLastError() } as i32).into()
+}
+
+fn copy_sparse_file(
+    source: &Path,
+    target: &Path,
+    expected_size: u64,
+    strings: &Strings,
+    sender: &Sender<EngineEvent>,
+    control: &Arc<Control>,
+) -> Result<()> {
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let source_handle = open_file(
+        source,
+        FILE_GENERIC_READ,
+        share,
+        OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN,
+    )?;
+    let target_handle = open_file(
+        target,
+        FILE_GENERIC_WRITE,
+        share,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL,
+    )?;
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            target_handle.0,
+            FSCTL_SET_SPARSE,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(last_os_error());
+    }
+    let mut file_size: i64 = 0;
+    let ok = unsafe { GetFileSizeEx(source_handle.0, &mut file_size) };
+    if ok == 0 {
+        return Err(last_os_error());
+    }
+    let ok = unsafe { SetFilePointerEx(target_handle.0, file_size, std::ptr::null_mut(), FILE_BEGIN) };
+    if ok == 0 {
+        return Err(last_os_error());
+    }
+    let ok = unsafe { SetEndOfFile(target_handle.0) };
+    if ok == 0 {
+        return Err(last_os_error());
+    }
+    let copied = copy_allocated_ranges(
+        &source_handle,
+        &target_handle,
+        file_size,
+        strings,
+        sender,
+        control,
+    )?;
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut accessed = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut written = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let ok = unsafe {
+        GetFileTime(
+            source_handle.0,
+            &mut created,
+            &mut accessed,
+            &mut written,
+        )
+    };
+    if ok != 0 {
+        let _ = unsafe {
+            SetFileTime(
+                target_handle.0,
+                &created,
+                &accessed,
+                &written,
+            )
+        };
+    }
+    drop(source_handle);
+    drop(target_handle);
+    let source_wide = path_to_wide(source);
+    let attributes = unsafe { GetFileAttributesW(source_wide.as_ptr()) };
+    if attributes != INVALID_FILE_ATTRIBUTES {
+        let target_wide = path_to_wide(target);
+        let _ = unsafe { SetFileAttributesW(target_wide.as_ptr(), attributes) };
+    }
+    if expected_size > copied {
+        sender.send(EngineEvent::BytesDone(expected_size - copied))?;
+    }
+    Ok(())
+}
+
+fn copy_allocated_ranges(
+    source: &OwnedHandle,
+    target: &OwnedHandle,
+    file_size: i64,
+    strings: &Strings,
+    sender: &Sender<EngineEvent>,
+    control: &Arc<Control>,
+) -> Result<u64> {
+    if file_size <= 0 {
+        return Ok(0);
+    }
+    let mut query = FILE_ALLOCATED_RANGE_BUFFER {
+        FileOffset: 0,
+        Length: file_size,
+    };
+    let mut output = vec![FILE_ALLOCATED_RANGE_BUFFER::default(); 16];
+    let mut copied = 0u64;
+    loop {
+        if !control.wait() {
+            bail!("{}", strings.cancelled());
+        }
+        let mut returned = 0u32;
+        let ok = unsafe {
+            DeviceIoControl(
+                source.0,
+                FSCTL_QUERY_ALLOCATED_RANGES,
+                std::ptr::from_ref(&query).cast(),
+                mem::size_of::<FILE_ALLOCATED_RANGE_BUFFER>() as u32,
+                output.as_mut_ptr().cast(),
+                (output.len() * mem::size_of::<FILE_ALLOCATED_RANGE_BUFFER>()) as u32,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            let code = unsafe { GetLastError() };
+            if code == ERROR_HANDLE_EOF {
+                break;
+            }
+            if code != ERROR_MORE_DATA {
+                return Err(std::io::Error::from_raw_os_error(code as i32).into());
+            }
+        }
+        let count = (returned as usize) / mem::size_of::<FILE_ALLOCATED_RANGE_BUFFER>();
+        if count == 0 {
+            break;
+        }
+        for range in output.iter().take(count) {
+            copied += copy_file_range_bytes(
+                source,
+                target,
+                range.FileOffset as u64,
+                range.Length as u64,
+                strings,
+                sender,
+                control,
+            )?;
+        }
+        if ok != 0 {
+            break;
+        }
+        let last = output[count - 1];
+        let next = last.FileOffset.saturating_add(last.Length);
+        let end = query.FileOffset.saturating_add(query.Length);
+        if next >= end {
+            break;
+        }
+        query.Length = end - next;
+        query.FileOffset = next;
+    }
+    Ok(copied)
+}
+
+fn copy_file_range_bytes(
+    source: &OwnedHandle,
+    target: &OwnedHandle,
+    offset: u64,
+    length: u64,
+    strings: &Strings,
+    sender: &Sender<EngineEvent>,
+    control: &Arc<Control>,
+) -> Result<u64> {
+    const CHUNK: usize = 1024 * 1024;
+    let mut buffer = vec![0u8; CHUNK];
+    let mut remaining = length;
+    let mut position = offset;
+    let mut copied = 0u64;
+    while remaining > 0 {
+        if !control.wait() {
+            bail!("{}", strings.cancelled());
+        }
+        let want = remaining.min(CHUNK as u64) as u32;
+        let ok = unsafe {
+            SetFilePointerEx(source.0, position as i64, std::ptr::null_mut(), FILE_BEGIN)
+        };
+        if ok == 0 {
+            return Err(last_os_error());
+        }
+        let mut read = 0u32;
+        let ok = unsafe {
+            ReadFile(
+                source.0,
+                buffer.as_mut_ptr(),
+                want,
+                &mut read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(last_os_error());
+        }
+        if read == 0 {
+            break;
+        }
+        let ok = unsafe {
+            SetFilePointerEx(target.0, position as i64, std::ptr::null_mut(), FILE_BEGIN)
+        };
+        if ok == 0 {
+            return Err(last_os_error());
+        }
+        let mut written = 0u32;
+        let ok = unsafe {
+            WriteFile(
+                target.0,
+                buffer.as_ptr(),
+                read,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(last_os_error());
+        }
+        if written != read {
+            bail!("short sparse write");
+        }
+        sender.send(EngineEvent::BytesDone(written as u64))?;
+        copied += written as u64;
+        position += written as u64;
+        remaining -= written as u64;
+    }
+    Ok(copied)
 }
 
 fn copy_file_ex(
@@ -926,6 +1587,15 @@ fn next_temporary_path(target: &Path) -> PathBuf {
     }
 }
 
+fn path_to_wide_literal(path: &Path) -> Vec<u16> {
+    let stripped = strip_extended_prefix(path.to_path_buf());
+    stripped
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
 fn path_to_wide(path: &Path) -> Vec<u16> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     let prefix = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
@@ -997,6 +1667,7 @@ fn run_delete(
         sender.send(EngineEvent::Finished {
             cancelled: true,
             error_count: 0,
+            skip_count: 0,
         })?;
         return Ok(());
     }
@@ -1100,6 +1771,7 @@ fn run_delete(
     sender.send(EngineEvent::Finished {
         cancelled: control.cancelled.load(Ordering::Acquire),
         error_count,
+        skip_count: 0,
     })?;
     Ok(())
 }
@@ -1440,7 +2112,7 @@ fn create_symbolic_link(dest: &Path, target: &Path, is_dir: bool) -> Result<()> 
         }
     }
     let dest_wide = path_to_wide(dest);
-    let target_wide = path_to_wide(target);
+    let target_wide = path_to_wide_literal(target);
     let mut flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
     if is_dir {
         flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
@@ -1577,7 +2249,7 @@ mod tests {
     use crate::model::Settings;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
-    use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::GetCompressedFileSizeW;
 
     #[test]
     fn different_drive_is_not_same_volume() {
@@ -1589,6 +2261,41 @@ mod tests {
     fn unique_path_returns_original_when_available() {
         let path = PathBuf::from("definitely-not-existing-fastcopy-test.txt");
         assert_eq!(unique_path(&path), path);
+    }
+
+    #[test]
+    fn numbered_link_path_appends_space_index() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("a.txt");
+        fs::write(&file, b"1").unwrap();
+        let empty = HashSet::new();
+        assert_eq!(
+            numbered_link_path(&file, false, &empty),
+            root.path().join("a 2.txt")
+        );
+        fs::write(root.path().join("a 2.txt"), b"2").unwrap();
+        assert_eq!(
+            numbered_link_path(&file, false, &empty),
+            root.path().join("a 3.txt")
+        );
+        let dir = root.path().join("my.folder");
+        fs::create_dir(&dir).unwrap();
+        assert_eq!(
+            numbered_link_path(&dir, true, &empty),
+            root.path().join("my.folder 2")
+        );
+    }
+
+    #[test]
+    fn numbered_link_path_avoids_taken_names() {
+        let path = PathBuf::from(r"C:\fastcopy-link-test\a.txt");
+        let mut taken = HashSet::new();
+        taken.insert(path.clone());
+        taken.insert(PathBuf::from(r"C:\fastcopy-link-test\a 2.txt"));
+        assert_eq!(
+            numbered_link_path(&path, false, &taken),
+            PathBuf::from(r"C:\fastcopy-link-test\a 3.txt")
+        );
     }
 
     #[test]
@@ -1611,6 +2318,62 @@ mod tests {
             b"fastcopy"
         );
         assert!(source.exists());
+    }
+
+    #[test]
+    fn copies_multiple_sources() {
+        let root = tempdir().unwrap();
+        let a = root.path().join("a.txt");
+        let b = root.path().join("b.txt");
+        let destination = root.path().join("目标");
+        fs::write(&a, b"A").unwrap();
+        fs::write(&b, b"B").unwrap();
+        let request = TaskRequest {
+            kind: OperationKind::Copy,
+            sources: vec![a, b],
+            destination: Some(destination.clone()),
+            settings: test_settings(),
+            retry_items: Vec::new(),
+        };
+        assert_eq!(wait_for_task(start(request)), 0);
+        assert_eq!(fs::read(destination.join("a.txt")).unwrap(), b"A");
+        assert_eq!(fs::read(destination.join("b.txt")).unwrap(), b"B");
+    }
+
+    #[test]
+    fn copies_sparse_file_layout() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("sparse.bin");
+        let payload = b"payload!";
+        let hole = 2 * 1024 * 1024u64;
+        if !write_sparse_file(&source, hole, payload) {
+            return;
+        }
+        assert!(is_sparse_file(&source));
+        let destination = root.path().join("目标");
+        fs::create_dir_all(&destination).unwrap();
+        let request = TaskRequest {
+            kind: OperationKind::Copy,
+            sources: vec![source.clone()],
+            destination: Some(destination.clone()),
+            settings: test_settings(),
+            retry_items: Vec::new(),
+        };
+        assert_eq!(wait_for_task(start(request)), 0);
+        let copied = destination.join("sparse.bin");
+        assert!(is_sparse_file(&copied), "destination should stay sparse");
+        assert_eq!(
+            fs::metadata(&copied).unwrap().len(),
+            hole + payload.len() as u64
+        );
+        let on_disk = compressed_size(&copied).expect("allocated size");
+        assert!(
+            on_disk < hole,
+            "allocated {on_disk} should be far below logical {hole}"
+        );
+        let data = fs::read(&copied).unwrap();
+        assert_eq!(&data[hole as usize..], payload);
+        assert!(data[..hole as usize].iter().all(|byte| *byte == 0));
     }
 
     #[test]
@@ -1663,11 +2426,15 @@ mod tests {
         let request = TaskRequest {
             kind: OperationKind::Copy,
             sources: vec![source],
-            destination: Some(destination),
+            destination: Some(destination.clone()),
             settings,
             retry_items: Vec::new(),
         };
-        assert_eq!(wait_for_task(start(request)), 0);
+        let (errors, skips, failed) = wait_for_finish(start(request));
+        assert_eq!(errors, 0);
+        assert_eq!(skips, 1);
+        assert!(failed.is_empty());
+        assert_eq!(fs::read(destination.join("same.txt")).unwrap(), b"same-bytes");
     }
 
     #[test]
@@ -1759,7 +2526,10 @@ mod tests {
             settings,
             retry_items: Vec::new(),
         };
-        assert_eq!(wait_for_task(start(request)), 0);
+        let (errors, skips, failed) = wait_for_finish(start(request));
+        assert_eq!(errors, 0);
+        assert_eq!(skips, 1);
+        assert!(failed.is_empty());
         assert_eq!(fs::read(destination.join("file.txt")).unwrap(), b"old");
     }
 
@@ -1820,7 +2590,7 @@ mod tests {
             settings: test_settings(),
             retry_items: Vec::new(),
         };
-        let (errors, failed) = wait_for_finish(start(request));
+        let (errors, _skips, failed) = wait_for_finish(start(request));
         assert_eq!(errors, 1);
         assert_eq!(failed.len(), 1);
         assert!(!destination.join("locked.txt").exists());
@@ -1928,6 +2698,110 @@ mod tests {
         assert_eq!(fs::read(copied.join("b.txt")).unwrap(), b"shared");
     }
 
+    #[test]
+    fn copy_as_hardlink_file_shares_index() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("源.txt");
+        let destination = root.path().join("目标");
+        fs::write(&source, b"hard").unwrap();
+        let request = TaskRequest {
+            kind: OperationKind::CopyAsHardlink,
+            sources: vec![source.clone()],
+            destination: Some(destination.clone()),
+            settings: test_settings(),
+            retry_items: Vec::new(),
+        };
+        assert_eq!(wait_for_task(start(request)), 0);
+        let dest = destination.join("源.txt");
+        assert_eq!(fs::read(&dest).unwrap(), b"hard");
+        let src_info = file_index_info(&source).expect("source");
+        let dest_info = file_index_info(&dest).expect("dest");
+        assert_eq!(src_info.0, dest_info.0);
+        assert_eq!(src_info.1, dest_info.1);
+        assert_eq!(src_info.2, 2);
+        assert_eq!(dest_info.2, 2);
+    }
+
+    #[test]
+    fn copy_as_hardlink_directory_tree() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("源目录");
+        let destination = root.path().join("目标");
+        fs::create_dir_all(source.join("子")).unwrap();
+        fs::write(source.join("a.txt"), b"root").unwrap();
+        fs::write(source.join("子").join("b.txt"), b"nested").unwrap();
+        let request = TaskRequest {
+            kind: OperationKind::CopyAsHardlink,
+            sources: vec![source.clone()],
+            destination: Some(destination.clone()),
+            settings: test_settings(),
+            retry_items: Vec::new(),
+        };
+        assert_eq!(wait_for_task(start(request)), 0);
+        let copied = destination.join("源目录");
+        assert_eq!(fs::read(copied.join("a.txt")).unwrap(), b"root");
+        assert_eq!(fs::read(copied.join("子").join("b.txt")).unwrap(), b"nested");
+        let a = file_index_info(&source.join("a.txt")).expect("a");
+        let copied_a = file_index_info(&copied.join("a.txt")).expect("copied a");
+        assert_eq!(a.0, copied_a.0);
+        assert_eq!(a.1, copied_a.1);
+        let b = file_index_info(&source.join("子").join("b.txt")).expect("b");
+        let copied_b = file_index_info(&copied.join("子").join("b.txt")).expect("copied b");
+        assert_eq!(b.1, copied_b.1);
+    }
+
+    #[test]
+    fn copy_as_symlink_file_when_supported() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("源.txt");
+        let destination = root.path().join("目标");
+        fs::write(&source, b"sym").unwrap();
+        let probe = root.path().join("probe.lnk");
+        if create_symbolic_link(&probe, &source, false).is_err() {
+            return;
+        }
+        let _ = fs::remove_file(&probe);
+        let request = TaskRequest {
+            kind: OperationKind::CopyAsSymlink,
+            sources: vec![source.clone()],
+            destination: Some(destination.clone()),
+            settings: test_settings(),
+            retry_items: Vec::new(),
+        };
+        assert_eq!(wait_for_task(start(request)), 0);
+        let dest = destination.join("源.txt");
+        let meta = fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert_eq!(fs::read(&dest).unwrap(), b"sym");
+    }
+
+    #[test]
+    fn copy_as_hardlink_numbers_existing_name() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("源.txt");
+        let destination = root.path().join("目标");
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(&source, b"new").unwrap();
+        fs::write(destination.join("源.txt"), b"old").unwrap();
+        fs::write(destination.join("源 2.txt"), b"also").unwrap();
+        let request = TaskRequest {
+            kind: OperationKind::CopyAsHardlink,
+            sources: vec![source.clone()],
+            destination: Some(destination.clone()),
+            settings: test_settings(),
+            retry_items: Vec::new(),
+        };
+        assert_eq!(wait_for_task(start(request)), 0);
+        assert_eq!(fs::read(destination.join("源.txt")).unwrap(), b"old");
+        assert_eq!(fs::read(destination.join("源 2.txt")).unwrap(), b"also");
+        let numbered = destination.join("源 3.txt");
+        assert_eq!(fs::read(&numbered).unwrap(), b"new");
+        let src_info = file_index_info(&source).expect("source");
+        let dest_info = file_index_info(&numbered).expect("numbered");
+        assert_eq!(src_info.0, dest_info.0);
+        assert_eq!(src_info.1, dest_info.1);
+    }
+
     fn test_settings() -> Settings {
         Settings {
             worker_count: 2,
@@ -1940,20 +2814,89 @@ mod tests {
         wait_for_finish(handle).0
     }
 
-    fn wait_for_finish(handle: EngineHandle) -> (usize, Vec<RetryItem>) {
+    fn wait_for_finish(handle: EngineHandle) -> (usize, usize, Vec<RetryItem>) {
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut failed = Vec::new();
         loop {
             while let Some(event) = handle.try_recv() {
                 match event {
                     EngineEvent::Failed { item, .. } => failed.push(item),
-                    EngineEvent::Finished { error_count, .. } => return (error_count, failed),
+                    EngineEvent::Finished {
+                        error_count,
+                        skip_count,
+                        ..
+                    } => return (error_count, skip_count, failed),
                     _ => {}
                 }
             }
             assert!(Instant::now() < deadline, "task timed out");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn write_sparse_file(path: &Path, hole: u64, payload: &[u8]) -> bool {
+        let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        let Ok(handle) = open_file(
+            path,
+            FILE_GENERIC_WRITE,
+            share,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+        ) else {
+            return false;
+        };
+        let mut returned = 0u32;
+        let ok = unsafe {
+            DeviceIoControl(
+                handle.0,
+                FSCTL_SET_SPARSE,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return false;
+        }
+        let size = (hole + payload.len() as u64) as i64;
+        let ok = unsafe { SetFilePointerEx(handle.0, size, std::ptr::null_mut(), FILE_BEGIN) };
+        if ok == 0 {
+            return false;
+        }
+        if unsafe { SetEndOfFile(handle.0) } == 0 {
+            return false;
+        }
+        let ok = unsafe { SetFilePointerEx(handle.0, hole as i64, std::ptr::null_mut(), FILE_BEGIN) };
+        if ok == 0 {
+            return false;
+        }
+        let mut written = 0u32;
+        let ok = unsafe {
+            WriteFile(
+                handle.0,
+                payload.as_ptr(),
+                payload.len() as u32,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        ok != 0 && written == payload.len() as u32
+    }
+
+    fn compressed_size(path: &Path) -> Option<u64> {
+        let wide = path_to_wide(path);
+        let mut high = 0u32;
+        let low = unsafe { GetCompressedFileSizeW(wide.as_ptr(), &mut high) };
+        if low == u32::MAX {
+            let code = unsafe { GetLastError() };
+            if code != 0 {
+                return None;
+            }
+        }
+        Some(((high as u64) << 32) | u64::from(low))
     }
 
     struct ExclusiveLock(windows_sys::Win32::Foundation::HANDLE);

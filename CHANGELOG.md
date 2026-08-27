@@ -3,8 +3,12 @@
 Each item is English, then Chinese.
 每条先写英文，再写中文。
 
-## v1.0.1 (2026-08-26)
+## v1.0.1 (2026-08-26 ~ 27)
 
+- Refresh README / README.zh.md for v1.0.1 (CLI section, settings path, changelog link). Ignore Windows shortcuts and IDE junk in `.gitignore`.
+  按 v1.0.1 更新 README / README.zh.md（命令行、设置路径、更新日志链接）。`.gitignore` 忽略快捷方式和 IDE 临时文件。
+- Show the package version in the main window title bar (e.g. `快速复制 1.0.1` / `FastCopy 1.0.1`).
+  主窗口标题栏显示版本号（如 `快速复制 1.0.1` / `FastCopy 1.0.1`）。
 - Read the current Explorer selection (and invoke the menu once) so context-menu copy/cut/delete can include more than ~100 top-level items. Existing menus are repaired on the next launch.
   右键复制/剪切/删除改为读取资源管理器当前选中项并只启动一次，可超过约 100 个顶层选中项。已注册菜单会在下次启动时自动修复。
 - Add a setting for hard links, symbolic links, and directory junctions (ignore by default; follow or preserve).
@@ -17,6 +21,34 @@ Each item is English, then Chinese.
   「保留为链接」时目录联接重建为 junction，而不是目录符号链接。
 - Add tests for conflict policy, locked-file retry, Explorer menu register/unregister, and link Follow/Preserve.
   补测试：冲突策略、占用重试、右键注册/卸载、链接 Follow/Preserve。
+- Show the Explorer FastCopy submenu only when folders are selected, not when files are selected. Existing file-item menus are removed on the next launch.
+  右键「快速复制」仅在选中文件夹时出现，选中文件时不出现。已注册的文件菜单会在下次启动时清除。
+- Restore Quick Paste / Cancel on folder background: do not delete those verbs during cascade repair, and do not set MultiSelectModel on background verbs (Explorer hides them).
+  修复文件夹空白处「快速粘贴」「取消剪切/复制」：级联修复时不再删除它们；背景菜单不再设置 MultiSelectModel（否则资源管理器会隐藏）。
+- Allow Quick Cut / Quick Copy / Quick Delete when multiple folders are selected (`MultiSelectModel=Document`).
+  选中多个文件夹时也可以快速剪切、复制、删除（级联菜单改为 `MultiSelectModel=Document`）。
+- Add Copy as symbolic link and Copy as hard link for selected files and/or folders. Paste on a folder background shows “Paste as symbolic/hard link”, or “Paste (N files) as …” when more than one item was copied.
+  选中文件和/或文件夹时，子菜单增加「复制为符号链接」「复制为硬链接」。粘贴时显示「粘贴为符号链接/硬链接」，多于 1 项时为「粘贴(x个文件)为符号链接/硬链接」。
+- Add Settings toggles for the finish toast (copy/move/delete vs symbolic/hard-link paste). Raise the Settings window so all controls fit.
+  设置中增加「完成时提示」和「符号/硬链接完成提示」；设置窗口加高以显示全部控件。
+- Send finish toasts with FastCopy’s own AppUserModelID so PowerShell does not flash (noticeable on fast symbolic/hard-link paste).
+  完成通知改为使用本程序 AppID，避免弹出/闪现 PowerShell（粘贴符号/硬链接时尤其明显）。
+- When pasting as a symbolic or hard link, if the destination name exists, append ` 2`, ` 3`, ` 4`, … instead of overwriting or skipping.
+  粘贴为符号链接/硬链接时，若目标文件名已存在，自动附加 ` 2`、` 3`、` 4`……，不覆盖也不跳过。
+- Run symbolic/hard-link paste in the background without opening the progress window (it finished so fast that the window only flashed).
+  粘贴符号/硬链接改为后台执行，不打开进度窗口（原先完成太快，窗口只会闪一下）。
+- Preserve NTFS sparse files (holes stay holes). Fall back to a normal copy if the destination volume does not support sparse files.
+  复制 NTFS 稀疏文件时保留空洞。目标卷不支持稀疏文件时回退为普通复制。
+- CLI `--copy` / `--move` / `--delete` accept multiple paths; `--ignore` turns on the ignore file; exit codes are 0 success, 1 skipped, 2 failed, 3 cancelled, 64 usage error.
+  命令行 `--copy` / `--move` / `--delete` 支持多个路径；`--ignore` 启用 ignore 文件；退出码：0 成功、1 有跳过、2 有失败、3 取消、64 参数错误。
+- Show Quick Cut / Quick Copy / Quick Delete for selected files as well as folders. Mixed selections show the full submenu. Existing menus are repaired on the next launch.
+  选中文件时也可以快速剪切、复制、删除。文件与文件夹混选时显示完整子菜单。已注册菜单会在下次启动时自动补全。
+- Add Settings to the Explorer FastCopy submenu (separator above it). Existing menus are repaired on the next launch.
+  右键「快速复制」子菜单增加「参数设置」（上方有分隔线）。已注册菜单会在下次启动时自动补上。
+- Add Open link target to the FastCopy submenu. Clicking it reveals the real target of a symbolic link, junction, or `.lnk` in Explorer.
+  「快速复制」子菜单增加「打开链接目标」。点击后在资源管理器中定位符号链接、目录联接或快捷方式的真实目标。
+- Add View source path to the FastCopy submenu. A small window shows the path (the real target for a symbolic link, junction, or `.lnk`) with Copy path and Open path.
+  「快速复制」子菜单增加「查看源路径」。弹窗显示路径（符号链接、目录联接或快捷方式为真实目标），可复制、可在资源管理器中打开。
 
 ## v0.1.0 (2026-08-26)
 

@@ -23,6 +23,8 @@ pub struct Strings {
     pub delete_mode: &'static str,
     pub recycle_bin: &'static str,
     pub permanent: &'static str,
+    pub notify_on_finish: &'static str,
+    pub notify_on_link_finish: &'static str,
     pub shell_menu: &'static str,
     pub registered: &'static str,
     pub registered_machine: &'static str,
@@ -41,6 +43,8 @@ pub struct Strings {
     pub copy: &'static str,
     pub move_kind: &'static str,
     pub delete: &'static str,
+    pub copy_symlink: &'static str,
+    pub copy_hardlink: &'static str,
     pub scanning: &'static str,
     pub completed: &'static str,
     pub speed: &'static str,
@@ -55,7 +59,16 @@ pub struct Strings {
     pub menu_cascade: &'static str,
     pub menu_cut: &'static str,
     pub menu_copy: &'static str,
+    pub menu_copy_symlink: &'static str,
+    pub menu_copy_hardlink: &'static str,
     pub menu_delete: &'static str,
+    pub menu_open_target: &'static str,
+    pub menu_show_source: &'static str,
+    pub current_item: &'static str,
+    pub source_path: &'static str,
+    pub copy_path: &'static str,
+    pub open_path: &'static str,
+    pub path_copied: &'static str,
     pub menu_paste: &'static str,
     pub menu_clear: &'static str,
     pub items_unit: &'static str,
@@ -85,6 +98,8 @@ pub const ZH: Strings = Strings {
     delete_mode: "默认删除方式",
     recycle_bin: "移入回收站",
     permanent: "永久删除",
+    notify_on_finish: "完成时提示",
+    notify_on_link_finish: "符号/硬链接完成提示",
     shell_menu: "资源管理器右键菜单",
     registered: "已注册（当前用户）",
     registered_machine: "已注册（全机，需管理员卸载）",
@@ -103,6 +118,8 @@ pub const ZH: Strings = Strings {
     copy: "复制",
     move_kind: "移动",
     delete: "删除",
+    copy_symlink: "复制为符号链接",
+    copy_hardlink: "复制为硬链接",
     scanning: "正在扫描",
     completed: "已完成",
     speed: "实时速度",
@@ -117,7 +134,16 @@ pub const ZH: Strings = Strings {
     menu_cascade: "快速复制",
     menu_cut: "快速剪切",
     menu_copy: "快速复制",
+    menu_copy_symlink: "复制为符号链接",
+    menu_copy_hardlink: "复制为硬链接",
     menu_delete: "快速删除",
+    menu_open_target: "打开链接目标",
+    menu_show_source: "查看源路径",
+    current_item: "当前项",
+    source_path: "源路径",
+    copy_path: "复制路径",
+    open_path: "打开路径",
+    path_copied: "已复制",
     menu_paste: "快速粘贴",
     menu_clear: "取消剪切/复制",
     items_unit: "项/s",
@@ -147,6 +173,8 @@ pub const EN: Strings = Strings {
     delete_mode: "Default delete mode",
     recycle_bin: "Recycle Bin",
     permanent: "Permanent delete",
+    notify_on_finish: "Notify when finished",
+    notify_on_link_finish: "Notify when symbolic/hard link finishes",
     shell_menu: "Explorer context menu",
     registered: "Registered (this user)",
     registered_machine: "Registered (all users; admin to uninstall)",
@@ -165,6 +193,8 @@ pub const EN: Strings = Strings {
     copy: "Copy",
     move_kind: "Move",
     delete: "Delete",
+    copy_symlink: "Copy as symbolic link",
+    copy_hardlink: "Copy as hard link",
     scanning: "Scanning",
     completed: "Completed",
     speed: "Speed",
@@ -179,7 +209,16 @@ pub const EN: Strings = Strings {
     menu_cascade: "FastCopy",
     menu_cut: "Quick Cut",
     menu_copy: "Quick Copy",
+    menu_copy_symlink: "Copy as symbolic link",
+    menu_copy_hardlink: "Copy as hard link",
     menu_delete: "Quick Delete",
+    menu_open_target: "Open link target",
+    menu_show_source: "View source path",
+    current_item: "Current item",
+    source_path: "Source path",
+    copy_path: "Copy path",
+    open_path: "Open path",
+    path_copied: "Copied",
     menu_paste: "Quick Paste",
     menu_clear: "Cancel Cut/Copy",
     items_unit: "items/s",
@@ -208,11 +247,39 @@ impl Strings {
         self.app_title == "FastCopy"
     }
 
+    pub fn window_title(&self) -> String {
+        format!("{} {}", self.app_title, env!("CARGO_PKG_VERSION"))
+    }
+
     pub fn operation(&self, kind: OperationKind) -> &'static str {
         match kind {
             OperationKind::Copy => self.copy,
             OperationKind::Move => self.move_kind,
             OperationKind::Delete => self.delete,
+            OperationKind::CopyAsSymlink => self.copy_symlink,
+            OperationKind::CopyAsHardlink => self.copy_hardlink,
+        }
+    }
+
+    pub fn menu_paste_as_symlink(&self, count: usize) -> String {
+        self.menu_paste_as_link(count, "符号链接", "symbolic link")
+    }
+
+    pub fn menu_paste_as_hardlink(&self, count: usize) -> String {
+        self.menu_paste_as_link(count, "硬链接", "hard link")
+    }
+
+    fn menu_paste_as_link(&self, count: usize, zh: &str, en: &str) -> String {
+        if self.en() {
+            if count > 1 {
+                format!("Paste ({count} files) as {en}")
+            } else {
+                format!("Paste as {en}")
+            }
+        } else if count > 1 {
+            format!("粘贴({count}个文件)为{zh}")
+        } else {
+            format!("粘贴为{zh}")
         }
     }
 
@@ -604,6 +671,38 @@ impl Strings {
         }
     }
 
+    pub fn link_target_missing(&self, path: &Path) -> String {
+        if self.en() {
+            format!("Link target does not exist: {}", path.display())
+        } else {
+            format!("链接目标不存在：{}", path.display())
+        }
+    }
+
+    pub fn cannot_open_target(&self, error: &impl std::fmt::Display) -> String {
+        if self.en() {
+            format!("Cannot open link target: {error}")
+        } else {
+            format!("无法打开链接目标：{error}")
+        }
+    }
+
+    pub fn path_missing(&self, path: &Path) -> String {
+        if self.en() {
+            format!("Path does not exist: {}", path.display())
+        } else {
+            format!("路径不存在：{}", path.display())
+        }
+    }
+
+    pub fn cannot_open_path(&self, error: &impl std::fmt::Display) -> String {
+        if self.en() {
+            format!("Cannot open path: {error}")
+        } else {
+            format!("无法打开路径：{error}")
+        }
+    }
+
     pub fn unknown_cli_argument(&self, argument: &str) -> String {
         if self.en() {
             format!("Unknown argument: {argument}")
@@ -641,6 +740,14 @@ impl Strings {
             format!("Finished with {error_count} error(s)")
         } else {
             format!("操作完成但有 {error_count} 个错误")
+        }
+    }
+
+    pub fn finished_with_skips(&self, skip_count: usize) -> String {
+        if self.en() {
+            format!("Finished with {skip_count} skipped item(s)")
+        } else {
+            format!("操作完成，跳过 {skip_count} 项")
         }
     }
 

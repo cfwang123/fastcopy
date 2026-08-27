@@ -2,3 +2,9 @@
 /tmp
 /mydocs
 /release
+*.lnk
+*.pdb
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.vs/

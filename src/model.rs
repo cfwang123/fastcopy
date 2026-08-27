@@ -6,6 +6,8 @@ pub enum OperationKind {
     Copy,
     Move,
     Delete,
+    CopyAsSymlink,
+    CopyAsHardlink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +53,10 @@ pub struct Settings {
     pub link_policy: LinkPolicy,
     pub delete_mode: DeleteMode,
     pub language: Language,
+    #[serde(default = "default_true")]
+    pub notify_on_finish: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_link_finish: bool,
 }
 
 impl Default for Settings {
@@ -67,12 +73,29 @@ impl Default for Settings {
             link_policy: LinkPolicy::Ignore,
             delete_mode: DeleteMode::RecycleBin,
             language: Language::default(),
+            notify_on_finish: true,
+            notify_on_link_finish: true,
+        }
+    }
+}
+
+impl Settings {
+    pub fn notify_when_done(&self, kind: OperationKind) -> bool {
+        match kind {
+            OperationKind::CopyAsSymlink | OperationKind::CopyAsHardlink => {
+                self.notify_on_link_finish
+            }
+            _ => self.notify_on_finish,
         }
     }
 }
 
 pub fn default_ignore_file_name() -> String {
     ".gitignore".to_owned()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn sanitize_ignore_file_name(name: &str) -> String {
@@ -116,4 +139,28 @@ pub struct ProgressSnapshot {
     pub current_path: String,
     pub errors: Vec<String>,
     pub failed: Vec<RetryItem>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notify_when_done_respects_kind() {
+        let mut settings = Settings::default();
+        assert!(settings.notify_when_done(OperationKind::Copy));
+        assert!(settings.notify_when_done(OperationKind::CopyAsSymlink));
+        settings.notify_on_finish = false;
+        assert!(!settings.notify_when_done(OperationKind::Move));
+        assert!(settings.notify_when_done(OperationKind::CopyAsHardlink));
+        settings.notify_on_link_finish = false;
+        assert!(!settings.notify_when_done(OperationKind::CopyAsHardlink));
+    }
+
+    #[test]
+    fn missing_notify_fields_default_on() {
+        let settings: Settings = serde_json::from_str(r#"{"worker_count":4}"#).unwrap();
+        assert!(settings.notify_on_finish);
+        assert!(settings.notify_on_link_finish);
+    }
 }

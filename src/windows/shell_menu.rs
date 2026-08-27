@@ -31,11 +31,19 @@ const HKCU_CLEAR_VERB: &str = r"Software\Classes\Directory\Background\shell\Fast
 const CASCADE_CUT: &str = r"shell\1cut";
 const CASCADE_COPY: &str = r"shell\2copy";
 const CASCADE_DELETE: &str = r"shell\3delete";
+const CASCADE_SYMLINK: &str = r"shell\4symlink";
+const CASCADE_HARDLINK: &str = r"shell\5hardlink";
+const CASCADE_OPEN_TARGET: &str = r"shell\6open";
+const CASCADE_SHOW_SOURCE: &str = r"shell\6path";
+const CASCADE_SETTINGS: &str = r"shell\6settings";
+const CASCADE_SEPARATOR_BEFORE: u32 = 0x20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClipboardKind {
     Copy,
     Move,
+    CopySymlink,
+    CopyHardlink,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,6 +144,13 @@ pub fn clipboard_task(destination: PathBuf, settings: Settings) -> Result<TaskRe
     result
 }
 
+pub fn clipboard_is_link_copy() -> bool {
+    matches!(
+        clipboard_snapshot().map(|data| data.kind),
+        Some(ClipboardKind::CopySymlink | ClipboardKind::CopyHardlink)
+    )
+}
+
 fn take_clipboard_locked(
     directory: &Path,
     destination: PathBuf,
@@ -154,6 +169,8 @@ fn take_clipboard_locked(
         kind: match data.kind {
             ClipboardKind::Copy => OperationKind::Copy,
             ClipboardKind::Move => OperationKind::Move,
+            ClipboardKind::CopySymlink => OperationKind::CopyAsSymlink,
+            ClipboardKind::CopyHardlink => OperationKind::CopyAsHardlink,
         },
         sources: data.paths,
         destination: Some(destination),
@@ -235,19 +252,57 @@ pub fn try_update_menu_labels() {
                 set_verb_label(hive, &format!(r"{parent}\{CASCADE_COPY}"), t.menu_copy).is_ok();
             updated |=
                 set_verb_label(hive, &format!(r"{parent}\{CASCADE_DELETE}"), t.menu_delete).is_ok();
+            updated |= set_verb_label(
+                hive,
+                &format!(r"{parent}\{CASCADE_SYMLINK}"),
+                t.menu_copy_symlink,
+            )
+            .is_ok();
+            updated |= set_verb_label(
+                hive,
+                &format!(r"{parent}\{CASCADE_HARDLINK}"),
+                t.menu_copy_hardlink,
+            )
+            .is_ok();
+            updated |= set_verb_label(
+                hive,
+                &format!(r"{parent}\{CASCADE_OPEN_TARGET}"),
+                t.menu_open_target,
+            )
+            .is_ok();
+            updated |= set_verb_label(
+                hive,
+                &format!(r"{parent}\{CASCADE_SHOW_SOURCE}"),
+                t.menu_show_source,
+            )
+            .is_ok();
+            updated |= set_verb_label(
+                hive,
+                &format!(r"{parent}\{CASCADE_SETTINGS}"),
+                t.settings_title,
+            )
+            .is_ok();
         }
     }
+    let paste_label = paste_menu_label(t);
+    updated |= set_background_verb_label(HKEY_CURRENT_USER, HKCU_PASTE_VERB, &paste_label).is_ok();
     if updated {
         notify_assoc_changed();
     }
 }
 
 pub fn is_user_registered() -> bool {
-    hive_has(HKEY_CURRENT_USER, r"Software\Classes\*\shell\FastCopyRust")
+    hive_has(
+        HKEY_CURRENT_USER,
+        r"Software\Classes\Directory\shell\FastCopyRust",
+    ) || hive_has(HKEY_CURRENT_USER, r"Software\Classes\*\shell\FastCopyRust")
 }
 
 pub fn is_machine_registered() -> bool {
-    hive_has(HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes\*\shell\FastCopyRust")
+    hive_has(
+        HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Classes\Directory\shell\FastCopyRust",
+    ) || hive_has(HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes\*\shell\FastCopyRust")
 }
 
 pub fn register() -> Result<()> {
@@ -265,15 +320,7 @@ fn register_hive(hive: winreg::HKEY, classes: &str) -> Result<()> {
         &root,
         &format!(r"{classes}\Directory\Background\shell\FastCopyRust"),
     )?;
-    delete_if_exists(
-        &root,
-        &format!(r"{classes}\Directory\Background\shell\FastCopyPaste"),
-    )?;
-    delete_if_exists(
-        &root,
-        &format!(r"{classes}\Directory\Background\shell\FastCopyClear"),
-    )?;
-    sync_background_verbs(clipboard_has_items());
+    apply_background_verbs(clipboard_has_items())?;
     notify_assoc_changed();
     Ok(())
 }
@@ -454,17 +501,31 @@ fn user_verb_disabled(path: &str) -> bool {
 }
 
 fn sync_background_verbs(should_show: bool) {
-    if should_show == background_verbs_visible() {
+    if should_show {
+        if show_background_verbs().is_ok() {
+            notify_assoc_changed();
+        }
         return;
     }
-    let result = if should_show {
-        show_background_verbs()
-    } else {
-        hide_background_verbs()
-    };
+    if !background_verbs_visible() && background_keys_ready() {
+        return;
+    }
+    let result = apply_background_verbs(false);
     if result.is_ok() {
         notify_assoc_changed();
     }
+}
+
+fn background_keys_ready() -> bool {
+    machine_background_verbs_exist() || user_has_paste_command()
+}
+
+fn apply_background_verbs(should_show: bool) -> Result<()> {
+    show_background_verbs()?;
+    if !should_show {
+        hide_background_verbs()?;
+    }
+    Ok(())
 }
 
 fn show_background_verbs() -> Result<()> {
@@ -478,14 +539,15 @@ fn show_background_verbs() -> Result<()> {
     let icons = install_menu_icons()?;
     let user = RegKey::predef(HKEY_CURRENT_USER);
     let t = ui_strings();
-    upsert_user_verb(
+    let paste_label = paste_menu_label(t);
+    upsert_background_verb(
         &user,
         HKCU_PASTE_VERB,
-        t.menu_paste,
+        &paste_label,
         &format!("\"{executable}\" --shell-paste \"%V\""),
         &icons.join("paste.ico"),
     )?;
-    upsert_user_verb(
+    upsert_background_verb(
         &user,
         HKCU_CLEAR_VERB,
         t.menu_clear,
@@ -536,12 +598,17 @@ fn notify_shell(folder: Option<&Path>) {
     }
 }
 
-fn create_cascade(root: &RegKey, parent: &str, executable: &str, icons: &Path) -> Result<()> {
+fn create_cascade(
+    root: &RegKey,
+    parent: &str,
+    executable: &str,
+    icons: &Path,
+) -> Result<()> {
     let t = ui_strings();
     let (key, _) = root.create_subkey(parent)?;
     key.set_value("MUIVerb", &t.menu_cascade)?;
     key.set_value("SubCommands", &"")?;
-    key.set_value("MultiSelectModel", &"Single")?;
+    key.set_value("MultiSelectModel", &"Document")?;
     key.set_value("Icon", &icon_value(&icons.join("app.ico")))?;
     upsert_user_verb(
         root,
@@ -564,6 +631,46 @@ fn create_cascade(root: &RegKey, parent: &str, executable: &str, icons: &Path) -
         &format!("\"{executable}\" --shell-delete \"%1\""),
         &icons.join("delete.ico"),
     )?;
+    upsert_user_verb(
+        root,
+        &format!(r"{parent}\{CASCADE_SYMLINK}"),
+        t.menu_copy_symlink,
+        &format!("\"{executable}\" --shell-copy-symlink \"%1\""),
+        &icons.join("copy.ico"),
+    )?;
+    upsert_user_verb(
+        root,
+        &format!(r"{parent}\{CASCADE_HARDLINK}"),
+        t.menu_copy_hardlink,
+        &format!("\"{executable}\" --shell-copy-hardlink \"%1\""),
+        &icons.join("copy.ico"),
+    )?;
+    upsert_user_verb(
+        root,
+        &format!(r"{parent}\{CASCADE_OPEN_TARGET}"),
+        t.menu_open_target,
+        &format!("\"{executable}\" --shell-open-target \"%1\""),
+        &icons.join("app.ico"),
+    )?;
+    upsert_user_verb(
+        root,
+        &format!(r"{parent}\{CASCADE_SHOW_SOURCE}"),
+        t.menu_show_source,
+        &format!("\"{executable}\" --shell-show-source \"%1\""),
+        &icons.join("app.ico"),
+    )?;
+    upsert_user_verb(
+        root,
+        &format!(r"{parent}\{CASCADE_SETTINGS}"),
+        t.settings_title,
+        &format!("\"{executable}\" --settings"),
+        &icons.join("app.ico"),
+    )?;
+    let settings_key = root.open_subkey_with_flags(
+        &format!(r"{parent}\{CASCADE_SETTINGS}"),
+        KEY_SET_VALUE,
+    )?;
+    settings_key.set_value("CommandFlags", &CASCADE_SEPARATOR_BEFORE)?;
     Ok(())
 }
 
@@ -574,16 +681,75 @@ fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
             hive,
             &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_COPY}"),
         )
-        || !verb_is_single(hive, &format!(r"{classes}\Directory\shell\FastCopyRust"))
-        || !verb_is_single(hive, &format!(r"{classes}\*\shell\FastCopyRust"))
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SYMLINK}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SYMLINK}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_CUT}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_COPY}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_DELETE}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SETTINGS}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SETTINGS}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
+        )
+        || !verb_is_document(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
+        )
+        || verb_has_applies_to(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
+        )
+        || !verb_is_document(hive, &format!(r"{classes}\Directory\shell\FastCopyRust"))
+        || !verb_is_document(hive, &format!(r"{classes}\*\shell\FastCopyRust"))
 }
 
-fn verb_is_single(hive: winreg::HKEY, path: &str) -> bool {
+fn verb_is_document(hive: winreg::HKEY, path: &str) -> bool {
     let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
-        return true;
+        return false;
     };
     let model: String = key.get_value("MultiSelectModel").unwrap_or_default();
-    model == "Single"
+    model == "Document"
+}
+
+fn verb_has_applies_to(hive: winreg::HKEY, path: &str) -> bool {
+    let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
+        return false;
+    };
+    key.get_value::<String, _>("AppliesTo").is_ok()
 }
 
 fn repair_cascade_menu(hive: winreg::HKEY, classes: &str) -> Result<()> {
@@ -594,6 +760,29 @@ fn set_verb_label(hive: winreg::HKEY, path: &str, label: &str) -> Result<()> {
     let key = RegKey::predef(hive).open_subkey_with_flags(path, KEY_SET_VALUE)?;
     key.set_value("MUIVerb", &label)?;
     Ok(())
+}
+
+fn set_background_verb_label(hive: winreg::HKEY, path: &str, label: &str) -> Result<()> {
+    let key = RegKey::predef(hive).open_subkey_with_flags(path, KEY_SET_VALUE)?;
+    key.set_value("", &label)?;
+    key.set_value("MUIVerb", &label)?;
+    Ok(())
+}
+
+fn clipboard_snapshot() -> Option<ClipboardData> {
+    read_json::<ClipboardData>(&app_data_directory().join(CLIPBOARD_FILE))
+        .filter(|data| !data.paths.is_empty())
+}
+
+fn paste_menu_label(t: &crate::i18n::Strings) -> String {
+    match clipboard_snapshot() {
+        Some(data) => match data.kind {
+            ClipboardKind::Copy | ClipboardKind::Move => t.menu_paste.to_string(),
+            ClipboardKind::CopySymlink => t.menu_paste_as_symlink(data.paths.len()),
+            ClipboardKind::CopyHardlink => t.menu_paste_as_hardlink(data.paths.len()),
+        },
+        None => t.menu_paste.to_string(),
+    }
 }
 
 fn ui_strings() -> &'static crate::i18n::Strings {
@@ -614,7 +803,27 @@ fn upsert_user_verb(
     let (key, _) = root.create_subkey(path)?;
     key.set_value("MUIVerb", &label)?;
     key.set_value("Icon", &icon_value(icon))?;
-    key.set_value("MultiSelectModel", &"Single")?;
+    key.set_value("MultiSelectModel", &"Document")?;
+    delete_value_if_exists(&key, "LegacyDisable")?;
+    delete_value_if_exists(&key, "ProgrammaticAccessOnly")?;
+    delete_value_if_exists(&key, "AppliesTo")?;
+    let (command_key, _) = key.create_subkey("command")?;
+    command_key.set_value("", &command)?;
+    Ok(())
+}
+
+fn upsert_background_verb(
+    root: &RegKey,
+    path: &str,
+    label: &str,
+    command: &str,
+    icon: &Path,
+) -> Result<()> {
+    let (key, _) = root.create_subkey(path)?;
+    key.set_value("", &label)?;
+    key.set_value("MUIVerb", &label)?;
+    key.set_value("Icon", &icon_value(icon))?;
+    delete_value_if_exists(&key, "MultiSelectModel")?;
     delete_value_if_exists(&key, "LegacyDisable")?;
     delete_value_if_exists(&key, "ProgrammaticAccessOnly")?;
     delete_value_if_exists(&key, "AppliesTo")?;
@@ -711,24 +920,128 @@ mod tests {
     #[test]
     fn register_and_unregister_test_classes() {
         let _ = delete_if_exists(&RegKey::predef(HKEY_CURRENT_USER), TEST_ROOT);
-        write_cascade_keys(HKEY_CURRENT_USER, TEST_CLASSES).unwrap();
         let file_key = format!(r"{TEST_CLASSES}\*\shell\FastCopyRust");
         let dir_key = format!(r"{TEST_CLASSES}\Directory\shell\FastCopyRust");
+        let (dummy, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(&file_key).unwrap();
+        dummy.set_value("MUIVerb", &"old-file-menu").unwrap();
+        dummy.set_value("MultiSelectModel", &"Single").unwrap();
+        let (old_cut, _) = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(format!(r"{file_key}\{CASCADE_CUT}"))
+            .unwrap();
+        old_cut.set_value("MUIVerb", &"old-cut").unwrap();
+        write_cascade_keys(HKEY_CURRENT_USER, TEST_CLASSES).unwrap();
         assert!(hive_has(HKEY_CURRENT_USER, &file_key));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_CUT}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_COPY}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_DELETE}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_SYMLINK}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_HARDLINK}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_OPEN_TARGET}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_SHOW_SOURCE}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{dir_key}\{CASCADE_SHOW_SOURCE}")
+        ));
+        let open_key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(format!(r"{file_key}\{CASCADE_OPEN_TARGET}"))
+            .unwrap();
+        let open_model: String = open_key.get_value("MultiSelectModel").unwrap();
+        assert_eq!(open_model, "Document");
+        assert!(open_key.get_value::<String, _>("AppliesTo").is_err());
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_SETTINGS}")
+        ));
         assert!(hive_has(HKEY_CURRENT_USER, &dir_key));
         assert!(hive_has(
             HKEY_CURRENT_USER,
             &format!(r"{dir_key}\{CASCADE_COPY}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{dir_key}\{CASCADE_SYMLINK}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{dir_key}\{CASCADE_SETTINGS}")
         ));
         let model: String = RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey(&dir_key)
             .unwrap()
             .get_value("MultiSelectModel")
             .unwrap();
-        assert_eq!(model, "Single");
+        assert_eq!(model, "Document");
+        let file_model: String = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(&file_key)
+            .unwrap()
+            .get_value("MultiSelectModel")
+            .unwrap();
+        assert_eq!(file_model, "Document");
+        assert!(!menu_needs_repair(HKEY_CURRENT_USER, TEST_CLASSES));
+        let dir = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(&dir_key, KEY_SET_VALUE)
+            .unwrap();
+        dir.set_value("MultiSelectModel", &"Single").unwrap();
+        assert!(menu_needs_repair(HKEY_CURRENT_USER, TEST_CLASSES));
         delete_cascade_keys(HKEY_CURRENT_USER, TEST_CLASSES).unwrap();
         assert!(!hive_has(HKEY_CURRENT_USER, &file_key));
         assert!(!hive_has(HKEY_CURRENT_USER, &dir_key));
         let _ = delete_if_exists(&RegKey::predef(HKEY_CURRENT_USER), TEST_ROOT);
+    }
+
+    #[test]
+    fn paste_link_labels_include_count() {
+        let zh = crate::i18n::ZH;
+        assert_eq!(zh.menu_paste_as_symlink(1), "粘贴为符号链接");
+        assert_eq!(zh.menu_paste_as_symlink(3), "粘贴(3个文件)为符号链接");
+        assert_eq!(zh.menu_paste_as_hardlink(2), "粘贴(2个文件)为硬链接");
+        let en = crate::i18n::EN;
+        assert_eq!(en.menu_paste_as_hardlink(1), "Paste as hard link");
+        assert_eq!(
+            en.menu_paste_as_symlink(4),
+            "Paste (4 files) as symbolic link"
+        );
+    }
+
+    #[test]
+    fn background_paste_appears_in_explorer_menu() {
+        show_background_verbs().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let labels = crate::windows::explorer_sel::background_menu_labels(dir.path())
+            .expect("query Explorer background menu");
+        let joined = labels.join(" | ");
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("快速粘贴") || label.contains("Quick Paste")),
+            "background menu missing paste: {joined}"
+        );
+        let key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(HKCU_PASTE_VERB)
+            .unwrap();
+        let model: std::io::Result<String> = key.get_value("MultiSelectModel");
+        assert!(model.is_err(), "background paste must not set MultiSelectModel");
+        sync_background_verbs(clipboard_has_items());
     }
 }

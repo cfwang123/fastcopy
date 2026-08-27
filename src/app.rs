@@ -19,9 +19,11 @@ const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(99, 115, 137);
 const BORDER: egui::Color32 = egui::Color32::from_rgb(220, 227, 238);
 const DANGER: egui::Color32 = egui::Color32::from_rgb(220, 38, 38);
 
-pub(crate) const SETTINGS_SIZE: egui::Vec2 = egui::vec2(440.0, 500.0);
-pub(crate) const SETTINGS_MIN_SIZE: egui::Vec2 = egui::vec2(380.0, 420.0);
+pub(crate) const SETTINGS_SIZE: egui::Vec2 = egui::vec2(440.0, 700.0);
+pub(crate) const SETTINGS_MIN_SIZE: egui::Vec2 = egui::vec2(380.0, 620.0);
 const PROGRESS_SIZE: egui::Vec2 = egui::vec2(640.0, 400.0);
+const SOURCE_PATH_SIZE: egui::Vec2 = egui::vec2(520.0, 240.0);
+const SOURCE_PATH_MIN_SIZE: egui::Vec2 = egui::vec2(400.0, 200.0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UiMode {
@@ -180,6 +182,7 @@ impl FastCopyApp {
                     EngineEvent::Finished {
                         cancelled,
                         error_count,
+                        skip_count: _,
                     } => {
                         finished = Some((cancelled, error_count));
                     }
@@ -189,7 +192,9 @@ impl FastCopyApp {
         if let Some((cancelled, error_count)) = finished {
             if let Some(active) = self.active.take() {
                 let has_errors = error_count > 0 || !active.progress.errors.is_empty();
-                crate::notify::finished(self.t(), active.kind, cancelled, error_count);
+                if self.settings.notify_when_done(active.kind) {
+                    crate::notify::finished(self.t(), active.kind, cancelled, error_count);
+                }
                 if has_errors {
                     self.last_result = Some(LastResult {
                         kind: active.kind,
@@ -560,7 +565,7 @@ impl FastCopyApp {
             shell_menu::try_update_menu_labels();
             shell_menu::refresh_background_verbs();
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
-                language.strings().app_title.to_owned(),
+                language.strings().window_title(),
             ));
         }
         ui.add_space(6.0);
@@ -631,6 +636,11 @@ impl FastCopyApp {
                     t.permanent,
                 );
             });
+        ui.checkbox(&mut self.settings.notify_on_finish, t.notify_on_finish);
+        ui.checkbox(
+            &mut self.settings.notify_on_link_finish,
+            t.notify_on_link_finish,
+        );
         ui.separator();
         ui.label(t.shell_status(self.shell_user, self.shell_machine));
         ui.horizontal_wrapped(|ui| {
@@ -726,6 +736,136 @@ impl eframe::App for FastCopyApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         BACKGROUND.to_normalized_gamma_f32()
     }
+}
+
+struct SourcePathDialog {
+    current: String,
+    source: String,
+    show_current: bool,
+    status: String,
+    status_ok: bool,
+    copied_until: Option<Instant>,
+}
+
+impl SourcePathDialog {
+    fn new(context: &eframe::CreationContext<'_>, clicked: PathBuf) -> Self {
+        install_chinese_font(&context.egui_ctx);
+        configure_style(&context.egui_ctx);
+        let current = crate::windows::explorer_sel::display_path(&clicked);
+        let source = crate::windows::explorer_sel::source_path_for(&clicked);
+        let current = current.display().to_string();
+        let source = source.display().to_string();
+        let show_current = !current.eq_ignore_ascii_case(&source);
+        Self {
+            current,
+            source,
+            show_current,
+            status: String::new(),
+            status_ok: false,
+            copied_until: None,
+        }
+    }
+}
+
+impl eframe::App for SourcePathDialog {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let t = crate::i18n::strings(load_settings().language);
+        if let Some(until) = self.copied_until {
+            let now = Instant::now();
+            if now >= until {
+                if self.status_ok {
+                    self.status.clear();
+                }
+                self.copied_until = None;
+            } else {
+                ctx.request_repaint_after(until.saturating_duration_since(now));
+            }
+        }
+        fill_background(ui, |ui| {
+            show_card(ui, t.menu_show_source, "", |ui| {
+                if self.show_current {
+                    ui.colored_label(TEXT_SECONDARY, t.current_item);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&self.current).monospace())
+                            .wrap()
+                            .selectable(true),
+                    );
+                    ui.add_space(6.0);
+                }
+                ui.colored_label(TEXT_SECONDARY, t.source_path);
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.source)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .font(egui::TextStyle::Monospace),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.add(primary_button(t.copy_path)).clicked() {
+                        ctx.copy_text(self.source.clone());
+                        self.status = t.path_copied.to_owned();
+                        self.status_ok = true;
+                        self.copied_until = Some(Instant::now() + Duration::from_secs(2));
+                    }
+                    if ui.button(t.open_path).clicked() {
+                        let path = PathBuf::from(self.source.trim());
+                        if !path.exists() {
+                            self.status = t.path_missing(&path);
+                            self.status_ok = false;
+                            self.copied_until = None;
+                        } else if let Err(error) =
+                            crate::windows::explorer_sel::reveal_path(&path)
+                        {
+                            self.status = t.cannot_open_path(&error);
+                            self.status_ok = false;
+                            self.copied_until = None;
+                        } else {
+                            self.status.clear();
+                            self.status_ok = false;
+                            self.copied_until = None;
+                        }
+                    }
+                    if ui.button(t.close).clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if !self.status.is_empty() {
+                        let color = if self.status_ok { ACCENT } else { DANGER };
+                        ui.label(egui::RichText::new(&self.status).color(color));
+                    }
+                });
+            });
+        });
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        BACKGROUND.to_normalized_gamma_f32()
+    }
+}
+
+pub(crate) fn run_source_path_dialog(clicked: PathBuf) -> anyhow::Result<()> {
+    let t = crate::i18n::strings(load_settings().language);
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/app.png"))
+        .map_err(|error| anyhow::anyhow!("{}", t.cannot_load_icon(&error)))?;
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([SOURCE_PATH_SIZE.x, SOURCE_PATH_SIZE.y])
+        .with_min_inner_size([SOURCE_PATH_MIN_SIZE.x, SOURCE_PATH_MIN_SIZE.y])
+        .with_resizable(true)
+        .with_icon(icon);
+    if let Some(position) = crate::windows::centered_outer_position(SOURCE_PATH_SIZE) {
+        viewport = viewport.with_position(position);
+    }
+    let options = eframe::NativeOptions {
+        viewport,
+        persist_window: false,
+        ..Default::default()
+    };
+    eframe::run_native(
+        t.menu_show_source,
+        options,
+        Box::new(move |context| Ok(Box::new(SourcePathDialog::new(context, clicked)))),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 fn configure_style(context: &egui::Context) {
