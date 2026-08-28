@@ -2,6 +2,7 @@
 /tmp
 /mydocs
 /release
+AGENTS.md
 
 # Archives / debug symbols
 *.7z

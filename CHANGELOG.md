@@ -3,6 +3,12 @@
 Each version section is English, then Chinese.
 每节先写英文，再写中文。
 
+## unreleased
+
+- Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
+
+- 「参数设置」右键图标改为灰色齿轮。下次启动会覆盖已安装的图标。
+
 ## v1.0.3 (2026-08-28)
 
 - Version 1.0.3, with `node pack.js` producing `release/fastcopy_1.0.3.7z`.

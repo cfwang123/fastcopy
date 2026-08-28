@@ -308,6 +308,7 @@ pub fn settings_path() -> PathBuf {
 }
 
 pub fn refresh_background_verbs() {
+    let icons_changed = rewrite_menu_icons_if_changed();
     if is_user_registered() && menu_needs_repair(HKEY_CURRENT_USER, r"Software\Classes") {
         let _ = repair_cascade_menu(HKEY_CURRENT_USER, r"Software\Classes");
     }
@@ -315,12 +316,15 @@ pub fn refresh_background_verbs() {
         let _ = repair_cascade_menu(HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes");
     }
     if clipboard_has_items() {
-        if show_background_verbs().is_ok() {
+        if show_background_verbs().is_ok() || icons_changed {
             notify_assoc_changed();
         }
         return;
     }
     sync_background_verbs(false);
+    if icons_changed {
+        notify_assoc_changed();
+    }
 }
 
 pub fn try_update_menu_labels() {
@@ -1067,10 +1071,19 @@ fn delete_value_if_exists(key: &RegKey, name: &str) -> Result<()> {
     }
 }
 
-fn install_menu_icons() -> Result<PathBuf> {
+fn rewrite_menu_icons_if_changed() -> bool {
     let directory = app_data_directory().join("icons");
-    fs::create_dir_all(&directory)?;
-    for (name, bytes) in [
+    let stale = menu_icon_files().iter().any(|(name, bytes)| {
+        fs::read(directory.join(name)).ok().as_deref() != Some(*bytes)
+    });
+    if !stale {
+        return false;
+    }
+    install_menu_icons().is_ok()
+}
+
+fn menu_icon_files() -> [(&'static str, &'static [u8]); 9] {
+    [
         (
             "app.ico",
             include_bytes!("../../assets/icons/app.ico").as_slice(),
@@ -1107,7 +1120,13 @@ fn install_menu_icons() -> Result<PathBuf> {
             "settings.ico",
             include_bytes!("../../assets/icons/settings.ico").as_slice(),
         ),
-    ] {
+    ]
+}
+
+fn install_menu_icons() -> Result<PathBuf> {
+    let directory = app_data_directory().join("icons");
+    fs::create_dir_all(&directory)?;
+    for (name, bytes) in menu_icon_files() {
         fs::write(directory.join(name), bytes)?;
     }
     Ok(directory)
