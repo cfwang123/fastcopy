@@ -3,14 +3,16 @@
 Each version section is English, then Chinese.
 每节先写英文，再写中文。
 
-## unreleased
+## v1.0.3 (2026-08-28)
 
-- Refresh README / README.zh.md for current 1.0.2 behavior (menu icons, small-file copy path, Ignore extension on batch rename, auto-repair after upgrade, `cargo test --release`). Expand `.gitignore` for IDE, OS junk, archives, and `.env`.
+- Version 1.0.3, with `node pack.js` producing `release/fastcopy_1.0.3.7z`.
+- Refresh README / README.zh.md (menu icons, small-file copy path, Ignore extension on batch rename, auto-repair after upgrade, `cargo test --release`). Expand `.gitignore` for IDE, OS junk, archives, and `.env`.
 - Lead README / README.zh.md with Explorer menus on selected files and on a folder background, and describe each command.
 - Put the Explorer vs FastCopy copy/delete comparison at the top of README / README.zh.md.
 - Add an Install section: put the EXE in a fixed folder, start it, then register the Explorer menu.
 
-- 按当前 1.0.2 行为更新 README / README.zh.md（菜单图标、小文件复制路径、批量改名「忽略扩展名」、升级后自动补菜单、`cargo test --release`）。`.gitignore` 补充 IDE、系统垃圾、压缩包和 `.env`。
+- 版本号 1.0.3；`node pack.js` 一键打包为 `release/fastcopy_1.0.3.7z`。
+- 更新 README / README.zh.md（菜单图标、小文件复制路径、批量改名「忽略扩展名」、升级后自动补菜单、`cargo test --release`）。`.gitignore` 补充 IDE、系统垃圾、压缩包和 `.env`。
 - README / README.zh.md 开篇改为介绍选中文件与文件夹空白处的右键菜单，以及各菜单项的功能。
 - README / README.zh.md 开篇增加与资源管理器复制/删除的对照数字。
 - README / README.zh.md 增加「安装」节：把 exe 放到固定位置，启动后再注册菜单。

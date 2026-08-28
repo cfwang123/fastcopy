@@ -1,6 +1,6 @@
 # 快速复制
 
-版本 **1.0.2**。[English](README.md) · [更新日志](CHANGELOG.md)（每节先英文再中文） · [性能测试](benchmark.md)
+版本 **1.0.3**。[English](README.md) · [更新日志](CHANGELOG.md)（每节先英文再中文） · [性能测试](benchmark.md)
 
 面向 Windows 10/11 的文件工具，用于复制、移动和删除大量文件。程序采用文件级并发队列，适合包含大量小文件的目录；同一磁盘分区内的移动优先使用文件系统重命名。
 
@@ -62,7 +62,7 @@
 
 ## 引擎与设置
 
-- 设置页可切换中文 / English 界面（下拉选项固定显示 `中文` / `English`）。窗口标题栏显示版本号（如 `快速复制 1.0.2`）。
+- 设置页可切换中文 / English 界面（下拉选项固定显示 `中文` / `English`）。窗口标题栏显示版本号（如 `快速复制 1.0.3`）。
 - 冲突时覆盖、跳过或自动重命名；可选在大小和修改时间相同时跳过。
 - 复制文件夹时可按 ignore 文件（默认 `.gitignore`）跳过匹配项。
 - 硬链接/符号链接/目录联接：忽略（默认）、跟随目标，或保留为链接。
@@ -111,7 +111,7 @@ cargo build --release
 node pack.js
 ```
 
-可执行文件位于 `target/release/fastcopy.exe`。`node pack.js` 会编译 Release 并生成 `release/fastcopy_1.0.2.7z`（版本号来自 `Cargo.toml`）。Release 构建使用 OpenGL（glow）、LTO 和符号剥离以控制体积。
+可执行文件位于 `target/release/fastcopy.exe`。`node pack.js` 会编译 Release 并生成 `release/fastcopy_1.0.3.7z`（版本号来自 `Cargo.toml`）。Release 构建使用 OpenGL（glow）、LTO 和符号剥离以控制体积。
 
 ## 性能说明
 

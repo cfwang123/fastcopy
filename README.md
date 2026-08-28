@@ -1,6 +1,6 @@
 # FastCopy
 
-Version **1.0.2**. [中文说明](README.zh.md) · [Changelog](CHANGELOG.md) (English, then Chinese, per version) · [Benchmark](benchmark.md)
+Version **1.0.3**. [中文说明](README.zh.md) · [Changelog](CHANGELOG.md) (English, then Chinese, per version) · [Benchmark](benchmark.md)
 
 A Windows 10/11 file tool for copying, moving, and deleting large numbers of files. It uses a file-level concurrent queue, which works well for directories with many small files. Moves on the same volume prefer a filesystem rename.
 
@@ -62,7 +62,7 @@ Paste/Cancel on a folder background follow the UI language immediately. The Fast
 
 ## Engine and settings
 
-- Chinese/English UI language switch in Settings (dropdown labels stay `中文` / `English`). Window title bar shows the package version (e.g. `FastCopy 1.0.2`).
+- Chinese/English UI language switch in Settings (dropdown labels stay `中文` / `English`). Window title bar shows the package version (e.g. `FastCopy 1.0.3`).
 - Overwrite, skip, or rename on conflicts; optional skip when size and modified time match.
 - When copying folders, optional gitignore-style skip using a named ignore file (default `.gitignore`).
 - Hard links, symbolic links, and directory junctions: ignore (default), follow target, or preserve as links.
@@ -111,7 +111,7 @@ cargo build --release
 node pack.js
 ```
 
-The executable is `target/release/fastcopy.exe`. `node pack.js` builds Release and writes `release/fastcopy_1.0.2.7z` (the `x.x.x` comes from `Cargo.toml`). Release builds use OpenGL (glow), LTO, and symbol stripping to keep size down.
+The executable is `target/release/fastcopy.exe`. `node pack.js` builds Release and writes `release/fastcopy_1.0.3.7z` (the `x.x.x` comes from `Cargo.toml`). Release builds use OpenGL (glow), LTO, and symbol stripping to keep size down.
 
 ## Performance notes
 

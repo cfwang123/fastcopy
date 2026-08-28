@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "fastcopy"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
