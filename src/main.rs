@@ -6,6 +6,7 @@ mod engine;
 mod i18n;
 mod model;
 mod notify;
+mod tools;
 mod windows;
 
 use anyhow::{Result, anyhow};
@@ -129,9 +130,10 @@ fn run() -> Result<i32> {
         }
         Some("--shell-paste") => {
             let destination = argument_path(&arguments, t)?;
+            let keep = shell_menu::shift_key_down();
             if shell_menu::clipboard_is_link_copy() {
                 let settings = app::load_settings();
-                let request = shell_menu::clipboard_task(destination, settings)?;
+                let request = shell_menu::clipboard_task(destination, settings, keep)?;
                 return run_headless(
                     request.kind,
                     request.sources,
@@ -140,7 +142,12 @@ fn run() -> Result<i32> {
                     t,
                 );
             }
-            shell_menu::append_pending(&PendingCommand::Paste(destination))?;
+            let command = if keep {
+                PendingCommand::PasteKeep(destination)
+            } else {
+                PendingCommand::Paste(destination)
+            };
+            shell_menu::append_pending(&command)?;
         }
         Some("--shell-delete") => {
             let path = argument_path(&arguments, t)?;
@@ -164,6 +171,49 @@ fn run() -> Result<i32> {
         Some("--shell-show-source") => {
             let path = argument_path(&arguments, t)?;
             app::run_source_path_dialog(path)?;
+            return Ok(0);
+        }
+        Some("--shell-size") => {
+            let path = argument_path(&arguments, t)?;
+            let Some(claim) =
+                shell_menu::claim_selection("size", windows::explorer_sel::selected_paths(&path))?
+            else {
+                return Ok(0);
+            };
+            let result = app::run_size_dialog(claim.paths.clone());
+            drop(claim);
+            result?;
+            return Ok(0);
+        }
+        Some("--shell-copy-path") => {
+            let path = argument_path(&arguments, t)?;
+            let relative = shell_menu::shift_key_down();
+            let Some(claim) = shell_menu::claim_selection(
+                "copypath",
+                windows::explorer_sel::selected_paths(&path),
+            )?
+            else {
+                return Ok(0);
+            };
+            let text = tools::path_lines(&claim.paths, relative);
+            let count = claim.paths.len();
+            drop(claim);
+            if let Err(error) = windows::set_clipboard_text(&text) {
+                return Err(anyhow!("{}", t.clipboard_failed(&error)));
+            }
+            crate::notify::message(t, &t.paths_copied(count));
+            return Ok(0);
+        }
+        Some("--shell-rename") => {
+            let path = argument_path(&arguments, t)?;
+            let Some(claim) =
+                shell_menu::claim_selection("rename", windows::explorer_sel::selected_paths(&path))?
+            else {
+                return Ok(0);
+            };
+            let result = app::run_rename_dialog(claim.paths.clone());
+            drop(claim);
+            result?;
             return Ok(0);
         }
         Some(argument) => return Err(anyhow!("{}", t.unknown_cli_argument(argument))),

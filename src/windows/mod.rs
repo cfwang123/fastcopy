@@ -60,3 +60,37 @@ pub fn centered_outer_position(inner_size: egui::Vec2) -> Option<egui::Pos2> {
         ))
     }
 }
+
+pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    const CF_UNICODETEXT: u32 = 13;
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = wide.len() * 2;
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return Err("OpenClipboard".to_owned());
+        }
+        let _ = EmptyClipboard();
+        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if handle.is_null() {
+            CloseClipboard();
+            return Err("GlobalAlloc".to_owned());
+        }
+        let pointer = GlobalLock(handle);
+        if pointer.is_null() {
+            CloseClipboard();
+            return Err("GlobalLock".to_owned());
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr().cast::<u8>(), pointer.cast::<u8>(), bytes);
+        GlobalUnlock(handle);
+        if SetClipboardData(CF_UNICODETEXT, handle).is_null() {
+            CloseClipboard();
+            return Err("SetClipboardData".to_owned());
+        }
+        CloseClipboard();
+    }
+    Ok(())
+}

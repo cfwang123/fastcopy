@@ -64,6 +64,25 @@ pub struct Strings {
     pub menu_delete: &'static str,
     pub menu_open_target: &'static str,
     pub menu_show_source: &'static str,
+    pub menu_size: &'static str,
+    pub menu_copy_paths: &'static str,
+    pub menu_rename: &'static str,
+    pub size_files: &'static str,
+    pub size_dirs: &'static str,
+    pub size_bytes: &'static str,
+    pub size_errors: &'static str,
+    pub size_copy: &'static str,
+    pub rename_old_list: &'static str,
+    pub rename_old_list_hint: &'static str,
+    pub rename_old_expr: &'static str,
+    pub rename_new_expr: &'static str,
+    pub rename_match_case: &'static str,
+    pub rename_regex: &'static str,
+    pub rename_ignore_ext: &'static str,
+    pub rename_number_hint: &'static str,
+    pub rename_new_list: &'static str,
+    pub ok: &'static str,
+    pub cancel: &'static str,
     pub current_item: &'static str,
     pub source_path: &'static str,
     pub copy_path: &'static str,
@@ -139,6 +158,25 @@ pub const ZH: Strings = Strings {
     menu_delete: "快速删除",
     menu_open_target: "打开链接目标",
     menu_show_source: "查看源路径",
+    menu_size: "统计大小",
+    menu_copy_paths: "复制路径",
+    menu_rename: "批量改名",
+    size_files: "文件",
+    size_dirs: "目录",
+    size_bytes: "大小",
+    size_errors: "无法访问",
+    size_copy: "复制结果",
+    rename_old_list: "原文件名",
+    rename_old_list_hint: "可删行或调整顺序，改完后会重算新文件名",
+    rename_old_expr: "原文件名表达式",
+    rename_new_expr: "新文件名表达式",
+    rename_match_case: "匹配大小写",
+    rename_regex: "正则表达式",
+    rename_ignore_ext: "忽略扩展名",
+    rename_number_hint: "表达式：旧名中的 %1 或 * 为捕获，新名 %1 为第 1 个捕获，# 编号",
+    rename_new_list: "新文件名",
+    ok: "确定",
+    cancel: "取消",
     current_item: "当前项",
     source_path: "源路径",
     copy_path: "复制路径",
@@ -214,6 +252,25 @@ pub const EN: Strings = Strings {
     menu_delete: "Quick Delete",
     menu_open_target: "Open link target",
     menu_show_source: "View source path",
+    menu_size: "Folder size",
+    menu_copy_paths: "Copy paths",
+    menu_rename: "Batch rename",
+    size_files: "Files",
+    size_dirs: "Folders",
+    size_bytes: "Size",
+    size_errors: "Unreadable",
+    size_copy: "Copy summary",
+    rename_old_list: "Old names",
+    rename_old_list_hint: "Delete lines or reorder; new names are recalculated",
+    rename_old_expr: "Old filename pattern",
+    rename_new_expr: "New filename pattern",
+    rename_match_case: "Match case",
+    rename_regex: "Regular expressions",
+    rename_ignore_ext: "Ignore extension",
+    rename_number_hint: "Pattern: %1 or * in the old name is a capture; %1 in the new name is the first capture; # number",
+    rename_new_list: "New names",
+    ok: "OK",
+    cancel: "Cancel",
     current_item: "Current item",
     source_path: "Source path",
     copy_path: "Copy path",
@@ -406,6 +463,82 @@ impl Strings {
             format!("Processed {bytes}, {items} item(s)")
         } else {
             format!("处理 {bytes}，共 {items} 项")
+        }
+    }
+
+    pub fn paths_copied(&self, count: usize) -> String {
+        if self.en() {
+            format!("Copied {count} path(s)")
+        } else {
+            format!("已复制 {count} 条路径")
+        }
+    }
+
+    pub fn size_summary(&self, files: u64, dirs: u64, bytes: u64) -> String {
+        let size = crate::tools::format_bytes(bytes);
+        if self.en() {
+            format!("Files: {files}\r\nFolders: {dirs}\r\nSize: {size} ({bytes} bytes)")
+        } else {
+            format!("文件：{files}\r\n目录：{dirs}\r\n大小：{size}（{bytes} 字节）")
+        }
+    }
+
+    pub fn rename_done(&self, count: usize) -> String {
+        if self.en() {
+            format!("Renamed {count} item(s)")
+        } else {
+            format!("已重命名 {count} 项")
+        }
+    }
+
+    pub fn rename_none(&self) -> &'static str {
+        if self.en() {
+            "Nothing to rename"
+        } else {
+            "没有需要改名的项"
+        }
+    }
+
+    pub fn rename_status(&self, kind: crate::tools::RenameKind) -> &'static str {
+        match kind {
+            crate::tools::RenameKind::Ready => "",
+            crate::tools::RenameKind::Unchanged => {
+                if self.en() {
+                    "unchanged"
+                } else {
+                    "不变"
+                }
+            }
+            crate::tools::RenameKind::Invalid => {
+                if self.en() {
+                    "invalid name"
+                } else {
+                    "无效名称"
+                }
+            }
+            crate::tools::RenameKind::Conflict => {
+                if self.en() {
+                    "name exists"
+                } else {
+                    "目标已存在"
+                }
+            }
+        }
+    }
+
+    pub fn clipboard_failed(&self, error: &str) -> String {
+        if self.en() {
+            format!("Could not write clipboard: {error}")
+        } else {
+            format!("无法写入剪贴板：{error}")
+        }
+    }
+
+    pub fn rename_failed(&self, error: &str) -> String {
+        if self.en() {
+            format!("Rename failed: {error}")
+        } else {
+            format!("改名失败：{error}")
         }
     }
 

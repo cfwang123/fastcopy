@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,16 +21,34 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub fn selected_paths(clicked: &Path) -> Vec<PathBuf> {
     match selected_paths_from_explorer() {
         Ok(paths) if !paths.is_empty() => {
-            if paths.iter().any(|path| path == clicked) {
-                paths
-            } else {
-                let mut paths = paths;
+            let mut paths = unique_paths(paths);
+            if !paths.iter().any(|path| same_path(path, clicked)) {
                 paths.push(clicked.to_path_buf());
-                paths
             }
+            paths
         }
         _ => vec![clicked.to_path_buf()],
     }
+}
+
+pub fn same_path(left: &Path, right: &Path) -> bool {
+    path_key(left) == path_key(right)
+}
+
+pub fn unique_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| seen.insert(path_key(path)))
+        .collect()
+}
+
+pub fn path_key(path: &Path) -> String {
+    display_path(path)
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
 }
 
 fn selected_paths_from_explorer() -> windows::core::Result<Vec<PathBuf>> {
@@ -223,6 +242,25 @@ fn resolve_shortcut(path: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn unique_paths_ignores_case_and_extended_prefix() {
+        let paths = unique_paths(vec![
+            PathBuf::from(r"C:\Temp\A.txt"),
+            PathBuf::from(r"c:\temp\a.txt"),
+            PathBuf::from(r"\\?\C:\Temp\A.txt"),
+            PathBuf::from(r"C:\Temp\B.txt"),
+        ]);
+        assert_eq!(paths.len(), 2);
+        assert!(same_path(
+            Path::new(r"C:\Foo\Bar.TXT"),
+            Path::new(r"c:\foo\bar.txt")
+        ));
+        assert!(!same_path(
+            Path::new(r"C:\Foo\Bar.txt"),
+            Path::new(r"C:\Foo\Baz.txt")
+        ));
+    }
 
     #[test]
     fn resolve_symlink_file_when_supported() {

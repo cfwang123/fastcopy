@@ -3,11 +3,15 @@ use crate::model::{
     ConflictPolicy, DeleteMode, Language, LinkPolicy, OperationKind, ProgressSnapshot, Settings,
     TaskRequest,
 };
+use crate::tools::{self, RenamePlan, SizeStats};
 use crate::windows::shell_menu::{self, InstanceGuard, PendingCommand};
 use eframe::egui;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const BACKGROUND: egui::Color32 = egui::Color32::from_rgb(244, 247, 252);
@@ -24,6 +28,9 @@ pub(crate) const SETTINGS_MIN_SIZE: egui::Vec2 = egui::vec2(380.0, 620.0);
 const PROGRESS_SIZE: egui::Vec2 = egui::vec2(640.0, 400.0);
 const SOURCE_PATH_SIZE: egui::Vec2 = egui::vec2(520.0, 240.0);
 const SOURCE_PATH_MIN_SIZE: egui::Vec2 = egui::vec2(400.0, 200.0);
+const SIZE_DIALOG_SIZE: egui::Vec2 = egui::vec2(440.0, 280.0);
+const RENAME_DIALOG_SIZE: egui::Vec2 = egui::vec2(700.0, 580.0);
+const RENAME_DIALOG_MIN_SIZE: egui::Vec2 = egui::vec2(620.0, 500.0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UiMode {
@@ -111,7 +118,13 @@ impl FastCopyApp {
         for command in commands {
             match command {
                 PendingCommand::Paste(destination) => {
-                    match shell_menu::clipboard_task(destination, self.settings.clone()) {
+                    match shell_menu::clipboard_task(destination, self.settings.clone(), false) {
+                        Ok(request) => self.queued.push_back(request),
+                        Err(error) => show_error(self.t(), error.to_string()),
+                    }
+                }
+                PendingCommand::PasteKeep(destination) => {
+                    match shell_menu::clipboard_task(destination, self.settings.clone(), true) {
                         Ok(request) => self.queued.push_back(request),
                         Err(error) => show_error(self.t(), error.to_string()),
                     }
@@ -870,6 +883,447 @@ pub(crate) fn run_source_path_dialog(clicked: PathBuf) -> anyhow::Result<()> {
         t.menu_show_source,
         options,
         Box::new(move |context| Ok(Box::new(SourcePathDialog::new(context, clicked)))),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+struct SizeDialog {
+    shared: Arc<Mutex<(SizeStats, String, bool)>>,
+    cancelled: Arc<AtomicBool>,
+    status: String,
+    status_ok: bool,
+    copied_until: Option<Instant>,
+}
+
+impl SizeDialog {
+    fn new(context: &eframe::CreationContext<'_>, paths: Vec<PathBuf>) -> Self {
+        install_chinese_font(&context.egui_ctx);
+        configure_style(&context.egui_ctx);
+        let shared = Arc::new(Mutex::new((SizeStats::default(), String::new(), false)));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let shared_worker = Arc::clone(&shared);
+        let cancelled_worker = Arc::clone(&cancelled);
+        thread::spawn(move || {
+            let stats = tools::scan_size(&paths, &cancelled_worker, |stats, path| {
+                if let Ok(mut guard) = shared_worker.lock() {
+                    guard.0 = stats.clone();
+                    guard.1 = path.display().to_string();
+                }
+            });
+            if let Ok(mut guard) = shared_worker.lock() {
+                guard.0 = stats;
+                guard.2 = true;
+            }
+        });
+        Self {
+            shared,
+            cancelled,
+            status: String::new(),
+            status_ok: false,
+            copied_until: None,
+        }
+    }
+}
+
+impl eframe::App for SizeDialog {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let t = crate::i18n::strings(load_settings().language);
+        if let Some(until) = self.copied_until {
+            let now = Instant::now();
+            if now >= until {
+                if self.status_ok {
+                    self.status.clear();
+                }
+                self.copied_until = None;
+            } else {
+                ctx.request_repaint_after(until.saturating_duration_since(now));
+            }
+        }
+        let (stats, current, done) = self
+            .shared
+            .lock()
+            .map(|guard| (guard.0.clone(), guard.1.clone(), guard.2))
+            .unwrap_or_default();
+        if !done {
+            ctx.request_repaint_after(Duration::from_millis(80));
+        }
+        fill_background(ui, |ui| {
+            let subtitle = if done {
+                String::new()
+            } else {
+                t.scanning.to_owned()
+            };
+            show_card(ui, t.menu_size, &subtitle, |ui| {
+                ui.columns(2, |columns| {
+                    show_metric(&mut columns[0], t.size_files, &stats.files.to_string());
+                    show_metric(&mut columns[1], t.size_dirs, &stats.dirs.to_string());
+                });
+                ui.add_space(8.0);
+                ui.columns(2, |columns| {
+                    show_metric(
+                        &mut columns[0],
+                        t.size_bytes,
+                        &tools::format_bytes(stats.bytes),
+                    );
+                    show_metric(&mut columns[1], t.size_errors, &stats.errors.to_string());
+                });
+                ui.add_space(8.0);
+                ui.colored_label(TEXT_SECONDARY, format!("{bytes} B", bytes = stats.bytes));
+                if !done && !current.is_empty() {
+                    ui.add_space(6.0);
+                    ui.colored_label(TEXT_SECONDARY, t.current_file(&current));
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.add(primary_button(t.size_copy)).clicked() {
+                        let text = t.size_summary(stats.files, stats.dirs, stats.bytes);
+                        match crate::windows::set_clipboard_text(&text) {
+                            Ok(()) => {
+                                self.status = t.path_copied.to_owned();
+                                self.status_ok = true;
+                                self.copied_until = Some(Instant::now() + Duration::from_secs(2));
+                            }
+                            Err(error) => {
+                                self.status = t.clipboard_failed(&error);
+                                self.status_ok = false;
+                                self.copied_until = None;
+                            }
+                        }
+                    }
+                    if ui.button(t.close).clicked() {
+                        self.cancelled.store(true, Ordering::Release);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if !self.status.is_empty() {
+                        let color = if self.status_ok { ACCENT } else { DANGER };
+                        ui.label(egui::RichText::new(&self.status).color(color));
+                    }
+                });
+            });
+        });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        BACKGROUND.to_normalized_gamma_f32()
+    }
+}
+
+pub(crate) fn run_size_dialog(paths: Vec<PathBuf>) -> anyhow::Result<()> {
+    let t = crate::i18n::strings(load_settings().language);
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/app.png"))
+        .map_err(|error| anyhow::anyhow!("{}", t.cannot_load_icon(&error)))?;
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([SIZE_DIALOG_SIZE.x, SIZE_DIALOG_SIZE.y])
+        .with_min_inner_size([380.0, 240.0])
+        .with_resizable(true)
+        .with_icon(icon);
+    if let Some(position) = crate::windows::centered_outer_position(SIZE_DIALOG_SIZE) {
+        viewport = viewport.with_position(position);
+    }
+    let options = eframe::NativeOptions {
+        viewport,
+        persist_window: false,
+        ..Default::default()
+    };
+    eframe::run_native(
+        t.menu_size,
+        options,
+        Box::new(move |context| Ok(Box::new(SizeDialog::new(context, paths)))),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+struct RenameDialog {
+    source_items: Vec<tools::RenameItem>,
+    items: Vec<tools::RenameItem>,
+    old_text: String,
+    new_text: String,
+    new_edit_epoch: u64,
+    options: tools::RenameOptions,
+    plans: Vec<RenamePlan>,
+    status: String,
+    status_ok: bool,
+    close: bool,
+}
+
+impl RenameDialog {
+    fn new(context: &eframe::CreationContext<'_>, paths: Vec<PathBuf>) -> Self {
+        install_chinese_font(&context.egui_ctx);
+        configure_style(&context.egui_ctx);
+        let items: Vec<tools::RenameItem> = paths
+            .into_iter()
+            .map(|path| {
+                let from = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("")
+                    .to_owned();
+                tools::RenameItem { path, from }
+            })
+            .collect();
+        let mut dialog = Self {
+            old_text: items
+                .iter()
+                .map(|item| item.from.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            new_text: String::new(),
+            new_edit_epoch: 0,
+            source_items: items.clone(),
+            items,
+            options: tools::RenameOptions::default(),
+            plans: Vec::new(),
+            status: String::new(),
+            status_ok: false,
+            close: false,
+        };
+        dialog.apply_auto_pattern();
+        dialog.rebuild_from_pattern();
+        dialog
+    }
+
+    fn apply_auto_pattern(&mut self) {
+        let names: Vec<String> = self.items.iter().map(|item| item.from.clone()).collect();
+        let (old_pattern, new_pattern) =
+            tools::common_rename_pattern(&names, self.options.ignore_extension);
+        self.options.old_pattern = old_pattern;
+        self.options.new_pattern = new_pattern;
+    }
+
+    fn paths_and_from(&self) -> (Vec<PathBuf>, Vec<String>) {
+        let paths = self.items.iter().map(|item| item.path.clone()).collect();
+        let from_names = self.items.iter().map(|item| item.from.clone()).collect();
+        (paths, from_names)
+    }
+
+    fn rebuild_from_pattern(&mut self) {
+        let (paths, from_names) = self.paths_and_from();
+        self.plans = tools::plan_renames_from(&paths, &from_names, &self.options);
+        let new_names: Vec<String> = self.plans.iter().map(|plan| plan.to.clone()).collect();
+        self.new_text = tools::align_new_name_text(&self.old_text, &new_names);
+        self.new_edit_epoch = self.new_edit_epoch.saturating_add(1);
+    }
+
+    fn rebuild_from_new_text(&mut self) {
+        let (paths, from_names) = self.paths_and_from();
+        let to_names = tools::name_list_from_text(&self.new_text, self.items.len(), &from_names);
+        self.plans = tools::plan_renames_to(&paths, &from_names, &to_names);
+        self.new_text = to_names.join("\n");
+    }
+
+    fn apply(&mut self, t: &crate::i18n::Strings) -> bool {
+        self.rebuild_from_new_text();
+        let ready: Vec<RenamePlan> = self
+            .plans
+            .iter()
+            .filter(|plan| plan.kind == tools::RenameKind::Ready)
+            .cloned()
+            .collect();
+        if ready.is_empty() {
+            self.status = t.rename_none().to_owned();
+            self.status_ok = false;
+            return false;
+        }
+        let mut ok = 0usize;
+        let mut last_error = String::new();
+        for plan in ready {
+            match tools::apply_rename(&plan) {
+                Ok(()) => {
+                    if let Some(item) = self
+                        .items
+                        .iter_mut()
+                        .find(|item| item.path == plan.source)
+                    {
+                        item.path = plan.dest.clone();
+                        item.from = plan.to.clone();
+                    }
+                    ok += 1;
+                }
+                Err(error) => last_error = error.to_string(),
+            }
+        }
+        self.old_text = self
+            .items
+            .iter()
+            .map(|item| item.from.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.apply_auto_pattern();
+        self.rebuild_from_pattern();
+        if ok == 0 {
+            self.status = t.rename_failed(&last_error);
+            self.status_ok = false;
+            false
+        } else {
+            self.status = t.rename_done(ok);
+            self.status_ok = true;
+            last_error.is_empty()
+        }
+    }
+}
+
+impl eframe::App for RenameDialog {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let t = crate::i18n::strings(load_settings().language);
+        if self.close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+        let conflict_text = self
+            .plans
+            .iter()
+            .find(|plan| {
+                matches!(
+                    plan.kind,
+                    tools::RenameKind::Conflict | tools::RenameKind::Invalid
+                )
+            })
+            .map(|plan| format!("{} ({})", plan.to, t.rename_status(plan.kind)));
+        fill_background(ui, |ui| {
+            ui.set_max_size(ui.available_size());
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                ui.horizontal(|ui| {
+                    if ui.add(primary_button(t.ok)).clicked() && self.apply(t) {
+                        self.close = true;
+                    }
+                    if ui.button(t.cancel).clicked() {
+                        self.close = true;
+                    }
+                    if !self.status.is_empty() {
+                        let color = if self.status_ok { ACCENT } else { DANGER };
+                        ui.label(egui::RichText::new(&self.status).color(color));
+                    } else if let Some(text) = &conflict_text {
+                        ui.colored_label(DANGER, text);
+                    }
+                });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_max_height(ui.available_height());
+                    let mut pattern_changed = false;
+                    let mut ignore_ext_changed = false;
+                    ui.colored_label(TEXT_SECONDARY, t.rename_old_list);
+                    ui.colored_label(TEXT_SECONDARY, t.rename_old_list_hint);
+                    let rest = ui.available_height();
+                    const MIDDLE: f32 = 196.0;
+                    let list_budget = (rest - MIDDLE).max(0.0);
+                    let old_h = (list_budget * 0.5).clamp(0.0, 220.0);
+                    let old_id = ui.id().with("rename_old_names");
+                    names_editor(ui, old_h, &mut self.old_text, old_id);
+                    let next_items = tools::reconcile_selection(
+                        &self.source_items,
+                        &self.items,
+                        &self.old_text,
+                    );
+                    let new_names: Vec<String> =
+                        self.plans.iter().map(|plan| plan.to.clone()).collect();
+                    let aligned = tools::align_new_name_text(&self.old_text, &new_names);
+                    if next_items != self.items {
+                        self.items = next_items;
+                        self.rebuild_from_pattern();
+                        self.status.clear();
+                    } else if tools::split_name_lines(&aligned)
+                        != tools::split_name_lines(&self.new_text)
+                    {
+                        self.new_text = aligned;
+                        self.new_edit_epoch = self.new_edit_epoch.saturating_add(1);
+                        self.status.clear();
+                    }
+                    ui.add_space(8.0);
+                    pattern_changed |=
+                        expression_edit(ui, t.rename_old_expr, &mut self.options.old_pattern);
+                    pattern_changed |=
+                        expression_edit(ui, t.rename_new_expr, &mut self.options.new_pattern);
+                    ui.horizontal(|ui| {
+                        pattern_changed |= ui
+                            .checkbox(&mut self.options.match_case, t.rename_match_case)
+                            .changed();
+                        pattern_changed |= ui
+                            .checkbox(&mut self.options.use_regex, t.rename_regex)
+                            .changed();
+                        ignore_ext_changed = ui
+                            .checkbox(&mut self.options.ignore_extension, t.rename_ignore_ext)
+                            .changed();
+                        pattern_changed |= ignore_ext_changed;
+                    });
+                    ui.colored_label(TEXT_SECONDARY, t.rename_number_hint);
+                    if ignore_ext_changed {
+                        self.apply_auto_pattern();
+                    }
+                    if pattern_changed {
+                        self.rebuild_from_pattern();
+                        self.status.clear();
+                    }
+                    ui.add_space(8.0);
+                    ui.colored_label(TEXT_SECONDARY, t.rename_new_list);
+                    let new_h = ui.available_height().max(1.0);
+                    let new_id = ui.id().with(("rename_new_names", self.new_edit_epoch));
+                    if names_editor(ui, new_h, &mut self.new_text, new_id) {
+                        self.rebuild_from_new_text();
+                        self.status.clear();
+                    }
+                });
+            });
+        });
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        BACKGROUND.to_normalized_gamma_f32()
+    }
+}
+
+fn expression_edit(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
+    ui.colored_label(TEXT_SECONDARY, label);
+    ui.add_sized(
+        [ui.available_width(), 24.0],
+        egui::TextEdit::singleline(value)
+            .font(egui::TextStyle::Monospace)
+            .background_color(SURFACE)
+            .margin(egui::vec2(6.0, 4.0)),
+    )
+    .changed()
+}
+
+fn names_editor(ui: &mut egui::Ui, height: f32, text: &mut String, id: egui::Id) -> bool {
+    ui.add_sized(
+        [ui.available_width(), height],
+        egui::TextEdit::multiline(text)
+            .id(id)
+            .font(egui::TextStyle::Monospace)
+            .background_color(SURFACE)
+            .margin(egui::vec2(6.0, 4.0)),
+    )
+    .changed()
+}
+
+pub(crate) fn run_rename_dialog(paths: Vec<PathBuf>) -> anyhow::Result<()> {
+    let t = crate::i18n::strings(load_settings().language);
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/app.png"))
+        .map_err(|error| anyhow::anyhow!("{}", t.cannot_load_icon(&error)))?;
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([RENAME_DIALOG_SIZE.x, RENAME_DIALOG_SIZE.y])
+        .with_min_inner_size([RENAME_DIALOG_MIN_SIZE.x, RENAME_DIALOG_MIN_SIZE.y])
+        .with_resizable(true)
+        .with_icon(icon);
+    if let Some(position) = crate::windows::centered_outer_position(RENAME_DIALOG_SIZE) {
+        viewport = viewport.with_position(position);
+    }
+    let options = eframe::NativeOptions {
+        viewport,
+        persist_window: false,
+        ..Default::default()
+    };
+    eframe::run_native(
+        t.menu_rename,
+        options,
+        Box::new(move |context| Ok(Box::new(RenameDialog::new(context, paths)))),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }

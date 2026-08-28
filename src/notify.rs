@@ -20,6 +20,14 @@ pub fn init() {
     });
 }
 
+pub fn message(strings: &Strings, body: &str) {
+    init();
+    let _ = winrt_notification::Toast::new(APP_ID)
+        .title(strings.app_title)
+        .text1(body)
+        .show();
+}
+
 pub fn finished(strings: &Strings, kind: OperationKind, cancelled: bool, errors: usize) {
     if cancelled {
         return;

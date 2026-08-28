@@ -1,4 +1,5 @@
 use crate::model::{OperationKind, Settings, TaskRequest};
+use crate::windows::explorer_sel;
 use anyhow::{Context, Result, anyhow};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -9,13 +10,15 @@ use std::io::{Read, Write};
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, GetLastError, WAIT_FAILED};
 use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
 use windows_sys::Win32::UI::Shell::{
     SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHCNE_ASSOCCHANGED, SHCNE_UPDATEDIR, SHCNF_FLUSH,
     SHCNF_IDLIST, SHCNF_PATHW, SHChangeNotify, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE};
@@ -35,8 +38,12 @@ const CASCADE_SYMLINK: &str = r"shell\4symlink";
 const CASCADE_HARDLINK: &str = r"shell\5hardlink";
 const CASCADE_OPEN_TARGET: &str = r"shell\6open";
 const CASCADE_SHOW_SOURCE: &str = r"shell\6path";
-const CASCADE_SETTINGS: &str = r"shell\6settings";
+const CASCADE_SIZE: &str = r"shell\7size";
+const CASCADE_COPY_PATHS: &str = r"shell\8copypath";
+const CASCADE_RENAME: &str = r"shell\9rename";
+const CASCADE_SETTINGS: &str = r"shell\zsettings";
 const CASCADE_SEPARATOR_BEFORE: u32 = 0x20;
+const LINK_APPLIES_TO: &str = "System.FileExtension:.lnk OR System.FileAttributes:1024";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClipboardKind {
@@ -56,11 +63,79 @@ struct ClipboardData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PendingCommand {
     Paste(PathBuf),
+    PasteKeep(PathBuf),
     Delete(PathBuf),
 }
 
 pub struct InstanceGuard {
     _file: File,
+}
+
+pub struct SelectionClaim {
+    _lock: File,
+    kind: &'static str,
+    pub paths: Vec<PathBuf>,
+}
+
+impl Drop for SelectionClaim {
+    fn drop(&mut self) {
+        let directory = app_data_directory();
+        let _ = fs::remove_file(directory.join(format!("{}.json", self.kind)));
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SelectionBatch {
+    paths: Vec<PathBuf>,
+    updated_millis: u128,
+}
+
+pub fn claim_selection(kind: &'static str, paths: Vec<PathBuf>) -> Result<Option<SelectionClaim>> {
+    let directory = app_data_directory();
+    fs::create_dir_all(&directory)?;
+    merge_selection_paths(kind, paths)?;
+    let lock = open_lock(&directory.join(format!("{kind}.lock")))?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {
+            thread::sleep(Duration::from_millis(400));
+            let batch = merge_selection_paths(kind, Vec::new())?;
+            Ok(Some(SelectionClaim {
+                _lock: lock,
+                kind,
+                paths: batch.paths,
+            }))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn merge_selection_paths(kind: &str, paths: Vec<PathBuf>) -> Result<SelectionBatch> {
+    let directory = app_data_directory();
+    let data_lock = open_lock(&directory.join(format!("{kind}-data.lock")))?;
+    data_lock.lock_exclusive()?;
+    let json_path = directory.join(format!("{kind}.json"));
+    let now = now_millis();
+    let mut batch = read_json::<SelectionBatch>(&json_path).unwrap_or(SelectionBatch {
+        paths: Vec::new(),
+        updated_millis: 0,
+    });
+    if now.saturating_sub(batch.updated_millis) > 2000 {
+        batch.paths.clear();
+    }
+    for path in paths {
+        if batch
+            .paths
+            .iter()
+            .any(|existing| explorer_sel::same_path(existing, &path))
+        {
+            continue;
+        }
+        batch.paths.push(path);
+    }
+    batch.updated_millis = now;
+    fs::write(&json_path, serde_json::to_vec(&batch)?)?;
+    FileExt::unlock(&data_lock)?;
+    Ok(batch)
 }
 
 pub fn app_data_directory() -> PathBuf {
@@ -103,9 +178,14 @@ pub fn update_clipboard(kind: ClipboardKind, paths: Vec<PathBuf>) -> Result<()> 
         data.paths.clear();
     }
     for path in paths {
-        if !data.paths.contains(&path) {
-            data.paths.push(path);
+        if data
+            .paths
+            .iter()
+            .any(|existing| explorer_sel::same_path(existing, &path))
+        {
+            continue;
         }
+        data.paths.push(path);
     }
     data.updated_millis = now;
     let bytes = serde_json::to_vec_pretty(&data)?;
@@ -130,16 +210,23 @@ pub fn clear_clipboard(folder: Option<&Path>) -> Result<()> {
     notify_shell(folder);
     Ok(())
 }
-pub fn clipboard_task(destination: PathBuf, settings: Settings) -> Result<TaskRequest> {
+pub fn shift_key_down() -> bool {
+    unsafe { GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000 != 0 }
+}
+
+pub fn clipboard_task(destination: PathBuf, settings: Settings, keep: bool) -> Result<TaskRequest> {
     let directory = app_data_directory();
     fs::create_dir_all(&directory)?;
     let lock = open_lock(&directory.join(CLIPBOARD_LOCK))?;
     lock.lock_exclusive()?;
-    let result = take_clipboard_locked(&directory, destination.clone(), settings);
+    let result = take_clipboard_locked(&directory, destination.clone(), settings, keep);
     FileExt::unlock(&lock)?;
-    if result.is_ok() {
-        let _ = hide_background_verbs();
-        notify_shell(Some(&destination));
+    if let Ok(request) = &result {
+        let kept = keep && request.kind != OperationKind::Move;
+        if !kept {
+            let _ = hide_background_verbs();
+            notify_shell(Some(&destination));
+        }
     }
     result
 }
@@ -155,6 +242,7 @@ fn take_clipboard_locked(
     directory: &Path,
     destination: PathBuf,
     settings: Settings,
+    keep: bool,
 ) -> Result<TaskRequest> {
     let path = directory.join(CLIPBOARD_FILE);
     let t = ui_strings();
@@ -162,7 +250,8 @@ fn take_clipboard_locked(
     if data.paths.is_empty() {
         return Err(anyhow!(t.clipboard_empty));
     }
-    if path.exists() {
+    let keep = keep && data.kind != ClipboardKind::Move;
+    if !keep && path.exists() {
         fs::remove_file(&path)?;
     }
     Ok(TaskRequest {
@@ -274,6 +363,24 @@ pub fn try_update_menu_labels() {
                 hive,
                 &format!(r"{parent}\{CASCADE_SHOW_SOURCE}"),
                 t.menu_show_source,
+            )
+            .is_ok();
+            updated |= set_verb_label(
+                hive,
+                &format!(r"{parent}\{CASCADE_SIZE}"),
+                t.menu_size,
+            )
+            .is_ok();
+            updated |= set_verb_label(
+                hive,
+                &format!(r"{parent}\{CASCADE_COPY_PATHS}"),
+                t.menu_copy_paths,
+            )
+            .is_ok();
+            updated |= set_verb_label(
+                hive,
+                &format!(r"{parent}\{CASCADE_RENAME}"),
+                t.menu_rename,
             )
             .is_ok();
             updated |= set_verb_label(
@@ -652,6 +759,7 @@ fn create_cascade(
         &format!("\"{executable}\" --shell-open-target \"%1\""),
         &icons.join("app.ico"),
     )?;
+    set_link_only_verb(root, &format!(r"{parent}\{CASCADE_OPEN_TARGET}"))?;
     upsert_user_verb(
         root,
         &format!(r"{parent}\{CASCADE_SHOW_SOURCE}"),
@@ -659,12 +767,35 @@ fn create_cascade(
         &format!("\"{executable}\" --shell-show-source \"%1\""),
         &icons.join("app.ico"),
     )?;
+    set_link_only_verb(root, &format!(r"{parent}\{CASCADE_SHOW_SOURCE}"))?;
+    upsert_user_verb(
+        root,
+        &format!(r"{parent}\{CASCADE_SIZE}"),
+        t.menu_size,
+        &format!("\"{executable}\" --shell-size \"%1\""),
+        &icons.join("size.ico"),
+    )?;
+    upsert_user_verb(
+        root,
+        &format!(r"{parent}\{CASCADE_COPY_PATHS}"),
+        t.menu_copy_paths,
+        &format!("\"{executable}\" --shell-copy-path \"%1\""),
+        &icons.join("path.ico"),
+    )?;
+    upsert_user_verb(
+        root,
+        &format!(r"{parent}\{CASCADE_RENAME}"),
+        t.menu_rename,
+        &format!("\"{executable}\" --shell-rename \"%1\""),
+        &icons.join("rename.ico"),
+    )?;
+    let _ = delete_if_exists(root, &format!(r"{parent}\shell\6settings"));
     upsert_user_verb(
         root,
         &format!(r"{parent}\{CASCADE_SETTINGS}"),
         t.settings_title,
         &format!("\"{executable}\" --settings"),
-        &icons.join("app.ico"),
+        &icons.join("settings.ico"),
     )?;
     let settings_key = root.open_subkey_with_flags(
         &format!(r"{parent}\{CASCADE_SETTINGS}"),
@@ -725,31 +856,120 @@ fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
             hive,
             &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
         )
-        || !verb_is_document(
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SIZE}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SIZE}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_COPY_PATHS}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_COPY_PATHS}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_RENAME}"),
+        )
+        || !hive_has(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_RENAME}"),
+        )
+        || hive_has(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\shell\6settings"),
+        )
+        || !verb_icon_ends_with(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SIZE}"),
+            "size.ico",
+        )
+        || !verb_icon_ends_with(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_COPY_PATHS}"),
+            "path.ico",
+        )
+        || !verb_icon_ends_with(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_RENAME}"),
+            "rename.ico",
+        )
+        || !verb_icon_ends_with(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SETTINGS}"),
+            "settings.ico",
+        )
+        || !verb_is_single(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
+        )
+        || !verb_is_single(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
+        )
+        || !verb_is_single(
             hive,
             &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
         )
-        || verb_has_applies_to(
+        || !verb_is_single(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
+        )
+        || !verb_applies_to_links(
+            hive,
+            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
+        )
+        || !verb_applies_to_links(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
+        )
+        || !verb_applies_to_links(
             hive,
             &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
+        )
+        || !verb_applies_to_links(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
         )
         || !verb_is_document(hive, &format!(r"{classes}\Directory\shell\FastCopyRust"))
         || !verb_is_document(hive, &format!(r"{classes}\*\shell\FastCopyRust"))
 }
 
-fn verb_is_document(hive: winreg::HKEY, path: &str) -> bool {
+fn verb_icon_ends_with(hive: winreg::HKEY, path: &str, suffix: &str) -> bool {
     let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
         return false;
     };
-    let model: String = key.get_value("MultiSelectModel").unwrap_or_default();
-    model == "Document"
+    let icon: String = key.get_value("Icon").unwrap_or_default();
+    icon.to_ascii_lowercase()
+        .ends_with(&suffix.to_ascii_lowercase())
 }
 
-fn verb_has_applies_to(hive: winreg::HKEY, path: &str) -> bool {
+fn verb_is_document(hive: winreg::HKEY, path: &str) -> bool {
+    verb_multi_select_model(hive, path) == "Document"
+}
+
+fn verb_is_single(hive: winreg::HKEY, path: &str) -> bool {
+    verb_multi_select_model(hive, path) == "Single"
+}
+
+fn verb_multi_select_model(hive: winreg::HKEY, path: &str) -> String {
+    let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
+        return String::new();
+    };
+    key.get_value("MultiSelectModel").unwrap_or_default()
+}
+
+fn verb_applies_to_links(hive: winreg::HKEY, path: &str) -> bool {
     let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
         return false;
     };
-    key.get_value::<String, _>("AppliesTo").is_ok()
+    let applies: String = key.get_value("AppliesTo").unwrap_or_default();
+    applies == LINK_APPLIES_TO
 }
 
 fn repair_cascade_menu(hive: winreg::HKEY, classes: &str) -> Result<()> {
@@ -812,6 +1032,13 @@ fn upsert_user_verb(
     Ok(())
 }
 
+fn set_link_only_verb(root: &RegKey, path: &str) -> Result<()> {
+    let key = root.open_subkey_with_flags(path, KEY_SET_VALUE)?;
+    key.set_value("MultiSelectModel", &"Single")?;
+    key.set_value("AppliesTo", &LINK_APPLIES_TO)?;
+    Ok(())
+}
+
 fn upsert_background_verb(
     root: &RegKey,
     path: &str,
@@ -863,6 +1090,22 @@ fn install_menu_icons() -> Result<PathBuf> {
         (
             "delete.ico",
             include_bytes!("../../assets/icons/delete.ico").as_slice(),
+        ),
+        (
+            "size.ico",
+            include_bytes!("../../assets/icons/size.ico").as_slice(),
+        ),
+        (
+            "path.ico",
+            include_bytes!("../../assets/icons/path.ico").as_slice(),
+        ),
+        (
+            "rename.ico",
+            include_bytes!("../../assets/icons/rename.ico").as_slice(),
+        ),
+        (
+            "settings.ico",
+            include_bytes!("../../assets/icons/settings.ico").as_slice(),
         ),
     ] {
         fs::write(directory.join(name), bytes)?;
@@ -961,14 +1204,40 @@ mod tests {
         ));
         assert!(hive_has(
             HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_SIZE}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_COPY_PATHS}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{file_key}\{CASCADE_RENAME}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
             &format!(r"{dir_key}\{CASCADE_SHOW_SOURCE}")
         ));
+        let show_key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(format!(r"{file_key}\{CASCADE_SHOW_SOURCE}"))
+            .unwrap();
+        let show_model: String = show_key.get_value("MultiSelectModel").unwrap();
+        assert_eq!(show_model, "Single");
+        let applies: String = show_key.get_value("AppliesTo").unwrap();
+        assert_eq!(applies, LINK_APPLIES_TO);
+        let dir_show: String = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(format!(r"{dir_key}\{CASCADE_SHOW_SOURCE}"))
+            .unwrap()
+            .get_value("MultiSelectModel")
+            .unwrap();
+        assert_eq!(dir_show, "Single");
         let open_key = RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey(format!(r"{file_key}\{CASCADE_OPEN_TARGET}"))
             .unwrap();
         let open_model: String = open_key.get_value("MultiSelectModel").unwrap();
-        assert_eq!(open_model, "Document");
-        assert!(open_key.get_value::<String, _>("AppliesTo").is_err());
+        assert_eq!(open_model, "Single");
+        let open_applies: String = open_key.get_value("AppliesTo").unwrap();
+        assert_eq!(open_applies, LINK_APPLIES_TO);
         assert!(hive_has(
             HKEY_CURRENT_USER,
             &format!(r"{file_key}\{CASCADE_SETTINGS}")
@@ -1043,5 +1312,77 @@ mod tests {
         let model: std::io::Result<String> = key.get_value("MultiSelectModel");
         assert!(model.is_err(), "background paste must not set MultiSelectModel");
         sync_background_verbs(clipboard_has_items());
+    }
+
+    #[test]
+    fn take_clipboard_keep_leaves_copy_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = ClipboardData {
+            kind: ClipboardKind::Copy,
+            paths: vec![PathBuf::from(r"C:\a.txt")],
+            updated_millis: 1,
+        };
+        fs::write(
+            dir.path().join(CLIPBOARD_FILE),
+            serde_json::to_vec(&data).unwrap(),
+        )
+        .unwrap();
+        let request = take_clipboard_locked(
+            dir.path(),
+            PathBuf::from(r"D:\dest"),
+            Settings::default(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(request.kind, OperationKind::Copy);
+        assert_eq!(request.sources, vec![PathBuf::from(r"C:\a.txt")]);
+        assert!(dir.path().join(CLIPBOARD_FILE).is_file());
+    }
+
+    #[test]
+    fn take_clipboard_clears_copy_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = ClipboardData {
+            kind: ClipboardKind::Copy,
+            paths: vec![PathBuf::from(r"C:\a.txt")],
+            updated_millis: 1,
+        };
+        fs::write(
+            dir.path().join(CLIPBOARD_FILE),
+            serde_json::to_vec(&data).unwrap(),
+        )
+        .unwrap();
+        take_clipboard_locked(
+            dir.path(),
+            PathBuf::from(r"D:\dest"),
+            Settings::default(),
+            false,
+        )
+        .unwrap();
+        assert!(!dir.path().join(CLIPBOARD_FILE).exists());
+    }
+
+    #[test]
+    fn take_clipboard_move_clears_even_when_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = ClipboardData {
+            kind: ClipboardKind::Move,
+            paths: vec![PathBuf::from(r"C:\a.txt")],
+            updated_millis: 1,
+        };
+        fs::write(
+            dir.path().join(CLIPBOARD_FILE),
+            serde_json::to_vec(&data).unwrap(),
+        )
+        .unwrap();
+        let request = take_clipboard_locked(
+            dir.path(),
+            PathBuf::from(r"D:\dest"),
+            Settings::default(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(request.kind, OperationKind::Move);
+        assert!(!dir.path().join(CLIPBOARD_FILE).exists());
     }
 }
