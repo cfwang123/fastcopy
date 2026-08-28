@@ -2,9 +2,34 @@
 /tmp
 /mydocs
 /release
-*.lnk
+
+# Archives / debug symbols
+*.7z
+*.zip
+*.rar
 *.pdb
+*.log
+*.bak
+*.tmp
+**/*.rs.bk
+
+# Shortcuts / OS junk
+*.lnk
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+.DS_Store
+
+# IDE / editor
 .vs/
+.idea/
+.vscode/
+.cursor/
+*.user
+*.suo
+*.swp
+*~
+
+# Local secrets (do not commit keys or machine paths)
+.env
+.env.*

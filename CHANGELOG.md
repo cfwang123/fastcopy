@@ -3,6 +3,12 @@
 Each version section is English, then Chinese.
 每节先写英文，再写中文。
 
+## unreleased
+
+- Refresh README / README.zh.md for current 1.0.2 behavior (menu icons, small-file copy path, Ignore extension on batch rename, auto-repair after upgrade, `cargo test --release`). Expand `.gitignore` for IDE, OS junk, archives, and `.env`.
+
+- 按当前 1.0.2 行为更新 README / README.zh.md（菜单图标、小文件复制路径、批量改名「忽略扩展名」、升级后自动补菜单、`cargo test --release`）。`.gitignore` 补充 IDE、系统垃圾、压缩包和 `.env`。
+
 ## v1.0.2 (2026-08-28)
 
 - Explorer submenu: Folder size (file/folder/byte counts), Copy paths (one path per line; Shift for relative), and Batch rename. Existing menus are repaired on the next launch.

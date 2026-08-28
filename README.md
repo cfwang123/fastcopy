@@ -1,6 +1,6 @@
 # FastCopy
 
-Version **1.0.2**. [中文说明](README.zh.md) · [Changelog](CHANGELOG.md) · [Benchmark](benchmark.md)
+Version **1.0.2**. [中文说明](README.zh.md) · [Changelog](CHANGELOG.md) (English, then Chinese, per version) · [Benchmark](benchmark.md)
 
 A Windows 10/11 Rust file tool for copying, moving, and deleting large numbers of files. It uses a file-level concurrent queue, which works well for directories with many small files. Moves on the same volume prefer a filesystem rename.
 
@@ -20,12 +20,12 @@ A Windows 10/11 Rust file tool for copying, moving, and deleting large numbers o
 - Hard links, symbolic links, and directory junctions: ignore (default), follow target, or preserve as links
 - Recycle Bin by default, with optional permanent delete
 - Optional file-size check after copy; last-write time, last-access time, and basic attributes are kept
-- Files ≥ 64 MiB use a dedicated worker and unbuffered CopyFileEx
+- Many small files copy with concurrent `ReadFile`/`WriteFile`, overlapped with the tree scan; files ≥ 64 MiB use a dedicated worker and unbuffered CopyFileEx
 - Locked/in-use files are skipped and listed at the end for retry
-- Explorer cascade for the current user (no admin): Quick Cut, Quick Copy, Quick Delete, copy as symbolic or hard link, Folder size, Copy paths, Batch rename, Settings (each with its own icon), Open link target, and View source path
+- Explorer cascade for the current user (no admin): Quick Cut, Quick Copy, Quick Delete, copy as symbolic or hard link, Folder size, Copy paths, Batch rename, Settings, Open link target, and View source path (each command has its own icon)
 - After a cut, copy, or link-copy, Quick Paste (or Paste as symbolic/hard link) and Cancel Cut/Copy appear on a folder background
 - Selection is read from Explorer, so more than ~100 top-level items can be included
-- App icon and context-menu icons (cut, copy, paste, delete, settings)
+- App icon and context-menu icons (cut, copy, paste, delete, folder size, copy paths, batch rename, settings)
 - Compact WinForms-like 9pt UI text and controls
 - Window always opens centered on the current screen
 - Toast notification when a task finishes (can be turned off in Settings; symbolic/hard-link paste has its own toggle). The toast is sent as FastCopy, not PowerShell, so a console does not flash. The progress window still closes on success
@@ -43,13 +43,13 @@ Settings are stored in `%LOCALAPPDATA%\FastCopy\settings.json`.
 
 ## Explorer menu
 
-In Settings, click **Register** to add the menu for the current Windows user (no administrator prompt). An older all-users install can still be removed with **Unregister all-users menu (admin)**. The FastCopy submenu appears for selected files and/or folders (cut, copy, delete, copy as symbolic or hard link, Folder size, Copy paths, Batch rename, Open link target, View source path, and Settings, including mixed selections). Open link target and View source path appear only when a single shortcut, symbolic link, or junction is selected: the former opens Explorer at the real target; the latter shows the path in a window (Copy path / Open path). Folder size scans the selection and shows file count, folder count, and bytes. Copy paths writes one absolute path per line to the Windows text clipboard (hold Shift for paths relative to the common parent). Batch rename opens one window for the whole selection: editable old/new name lists (delete or reorder old-name lines to drop/reorder files and recalculate), white `%1`/`#` pattern boxes (auto-filled from the common prefix/suffix like Everything F2; `%1` is the first capture; `###. %1` for `001.` prefixes), OK/Cancel. Quick Paste is not shown when files or folders are selected; it appears on a folder background only after a cut, copy, or link-copy, together with Cancel Cut/Copy. When the clipboard holds a link-copy, the paste label is “Paste as symbolic link” / “Paste as hard link”, or “Paste (N files) as …” when more than one item was copied. Windows 11 may put classic menus under **Show more options**. An already-registered menu is repaired on the next launch so file items also get Cut/Copy/Delete.
+In Settings, click **Register** to add the menu for the current Windows user (no administrator prompt). An older all-users install can still be removed with **Unregister all-users menu (admin)**. The FastCopy submenu appears for selected files and/or folders (cut, copy, delete, copy as symbolic or hard link, Folder size, Copy paths, Batch rename, and Settings, including mixed selections). Open link target and View source path appear only when a single shortcut, symbolic link, or junction is selected: the former opens Explorer at the real target; the latter shows the path in a window (Copy path / Open path). Folder size scans the selection and shows file count, folder count, and bytes. Copy paths writes one absolute path per line to the Windows text clipboard (hold Shift for paths relative to the common parent). Batch rename opens one window for the whole selection: editable old/new name lists (delete or reorder old-name lines to drop/reorder files and recalculate), white `%1`/`#` pattern boxes (auto-filled from the common prefix/suffix like Everything F2; `%1` is the first capture; `#` / `###` are numbers; toggling Ignore extension rebuilds the pattern from the stems), OK/Cancel. Quick Paste is not shown when files or folders are selected; it appears on a folder background only after a cut, copy, or link-copy, together with Cancel Cut/Copy. When the clipboard holds a link-copy, the paste label is “Paste as symbolic link” / “Paste as hard link”, or “Paste (N files) as …” when more than one item was copied. Windows 11 may put classic menus under **Show more options**. An already-registered menu is repaired on the next launch so file items also get Cut/Copy/Delete.
 
 Quick Copy, Quick Cut, and the link-copy commands use FastCopy’s own clipboard and do not replace the Windows text clipboard. Quick Paste clears that clipboard, so you must cut or copy again to paste. Hold Shift while clicking Quick Paste to keep the list and paste again (a cut still clears it, because the source is gone). When Explorer starts a menu command, the app reads the current Explorer selection so more than 100 top-level items can be included. Quick Delete uses the default delete mode saved in Settings.
 
 Paste as symbolic link creates one link per top-level item pointing at the original path (directories use a directory symbolic link; creating symbolic links may need Developer Mode). Paste as hard link creates hard links for files; for a folder it recreates the tree and hard-links each file (same volume only). If the destination name already exists, the new link is named with a trailing ` 2`, ` 3`, ` 4`, … and the existing file is left unchanged. Link paste runs in the background and does not open the progress window.
 
-Unregister from the Settings page. Register and unregister refresh the menu status automatically. After moving the EXE, unregister from the old location and register again from the new one. Re-register after changing icons or upgrading.
+Unregister from the Settings page. Register and unregister refresh the menu status automatically. After moving the EXE, unregister from the old location and register again from the new one. New menu items and icons from an upgrade are repaired on the next launch.
 
 Paste/Cancel on a folder background follow the UI language immediately. The FastCopy submenu labels update when the language is changed.
 
@@ -87,7 +87,7 @@ fastcopy.exe --unregister-shell
 Requires Rust stable, Visual Studio C++ Build Tools / Windows SDK, and 7-Zip for packaging:
 
 ```powershell
-cargo test
+cargo test --release
 cargo build --release
 node pack.js
 ```
