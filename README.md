@@ -1,6 +1,6 @@
 # FastCopy
 
-Version **1.0.1**. [中文说明](README.zh.md) · [Changelog](CHANGELOG.md)
+Version **1.0.1**. [中文说明](README.zh.md) · [Changelog](CHANGELOG.md) · [Benchmark](benchmark.md)
 
 A Windows 10/11 Rust file tool for copying, moving, and deleting large numbers of files. It uses a file-level concurrent queue, which works well for directories with many small files. Moves on the same volume prefer a filesystem rename.
 
@@ -96,10 +96,13 @@ The executable is `target/release/fastcopy.exe`. `node pack.js` builds Release a
 
 ## Performance notes
 
+Measured against Explorer copy/paste and permanent delete: [benchmark.md](benchmark.md).
+
+On a same-volume HDD `node_modules` tree (4019 files, 61 MiB, average ~15.5 KiB), FastCopy 1.0.1 with 16 workers copied about **8×** faster than Explorer paste (median 1.48 s vs 11.72 s) and permanently deleted about **2×** faster (0.97 s vs 2.02 s). Explorer paste was timed with the same `IFileOperation` engine Explorer uses (no UI). A single large file is still usually limited by the disk and cache; FastCopy is not guaranteed to win that case.
+
 - Many small files are limited by random disk I/O, antivirus scans, and filesystem metadata. Raising concurrency often helps.
 - Copy uses concurrent Windows `CopyFileEx` for small files. Files ≥ 64 MiB run on one worker with `COPY_FILE_NO_BUFFERING` (falls back if that flag is rejected).
 - Avoid very high concurrency on HDDs; try 2–4. On SSD/NVMe, start from the default.
-- A single large file usually runs near cache and device limits; it is not guaranteed to beat Explorer.
 - Recycle Bin work is done by Windows Shell; progress updates after each top-level item.
 
 ## Current limits

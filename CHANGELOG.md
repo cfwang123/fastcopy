@@ -3,8 +3,10 @@
 Each item is English, then Chinese.
 每条先写英文，再写中文。
 
-## v1.0.1 (2026-08-26 ~ 27)
+## v1.0.1 (2026-08-26 ~ 28)
 
+- Add an Explorer vs FastCopy copy/delete benchmark on a `node_modules` tree (`benchmark.md`); README links to it.
+  增加与资源管理器复制/删除的对照测试（`node_modules`，见 `benchmark.md`）；README 增加链接。
 - Refresh README / README.zh.md for v1.0.1 (CLI section, settings path, changelog link). Ignore Windows shortcuts and IDE junk in `.gitignore`.
   按 v1.0.1 更新 README / README.zh.md（命令行、设置路径、更新日志链接）。`.gitignore` 忽略快捷方式和 IDE 临时文件。
 - Show the package version in the main window title bar (e.g. `快速复制 1.0.1` / `FastCopy 1.0.1`).
