@@ -144,27 +144,33 @@ impl FastCopyApp {
                         total_items,
                         current,
                     } => {
-                        active.progress.scanning = true;
-                        active.progress.total_bytes = total_bytes;
-                        active.progress.total_items = total_items;
-                        active.progress.current_path = current.display().to_string();
+                        let io_started = active.progress.completed_bytes > 0
+                            || active.progress.completed_items > 0;
+                        if !io_started {
+                            active.progress.scanning = true;
+                            active.progress.current_path = current.display().to_string();
+                        }
+                        active.progress.total_bytes = active.progress.total_bytes.max(total_bytes);
+                        active.progress.total_items = active.progress.total_items.max(total_items);
                     }
                     EngineEvent::Started {
                         total_bytes,
                         total_items,
                     } => {
                         active.progress.scanning = false;
-                        active.progress.total_bytes = total_bytes;
-                        active.progress.total_items = total_items;
+                        active.progress.total_bytes = active.progress.total_bytes.max(total_bytes);
+                        active.progress.total_items = active.progress.total_items.max(total_items);
                     }
                     EngineEvent::Current(path) => {
                         active.progress.current_path = path.display().to_string();
                     }
                     EngineEvent::BytesDone(bytes) => {
+                        active.progress.scanning = false;
                         active.progress.completed_bytes =
                             active.progress.completed_bytes.saturating_add(bytes);
                     }
                     EngineEvent::ItemsDone(items) => {
+                        active.progress.scanning = false;
                         active.progress.completed_items =
                             active.progress.completed_items.saturating_add(items);
                     }

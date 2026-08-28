@@ -18,9 +18,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_HANDLE_EOF, ERROR_INVALID_FUNCTION, ERROR_LOCK_VIOLATION, ERROR_MORE_DATA,
-    ERROR_NOT_SUPPORTED, ERROR_OPERATION_ABORTED, ERROR_PATH_NOT_FOUND, ERROR_REQUEST_ABORTED,
-    ERROR_SHARING_VIOLATION, FILETIME, GetLastError, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_HANDLE_EOF,
+    ERROR_INVALID_FUNCTION, ERROR_LOCK_VIOLATION, ERROR_MORE_DATA, ERROR_NOT_SUPPORTED,
+    ERROR_OPERATION_ABORTED, ERROR_PATH_NOT_FOUND, ERROR_REQUEST_ABORTED, ERROR_SHARING_VIOLATION,
+    FILETIME, GetLastError, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, COPY_FILE_ALLOW_DECRYPTED_DESTINATION, COPY_FILE_FAIL_IF_EXISTS,
@@ -28,8 +29,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateSymbolicLinkW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_SPARSE_FILE, FILE_ATTRIBUTE_TAG_INFO,
     FILE_BEGIN, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN,
     FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileAttributeTagInfo, GetFileAttributesW, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFileSizeEx, GetFileTime, INVALID_FILE_ATTRIBUTES,
+    FILE_SHARE_WRITE, FileAttributeTagInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileSizeEx, GetFileTime,
     OPEN_EXISTING, PROGRESS_CANCEL, PROGRESS_CONTINUE, ReadFile, SetEndOfFile, SetFileAttributesW,
     SetFilePointerEx, SetFileTime, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
     SYMBOLIC_LINK_FLAG_DIRECTORY, WriteFile,
@@ -42,7 +43,9 @@ use windows_sys::Win32::System::Ioctl::{
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const LARGE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const SMALL_COPY_CHUNK: usize = 1024 * 1024;
 const SCAN_EMIT_INTERVAL: Duration = Duration::from_millis(80);
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(32);
 const MTIME_SLACK: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
@@ -149,6 +152,8 @@ struct FileWork {
     target: PathBuf,
     size: u64,
     delete_source: bool,
+    sparse: bool,
+    attributes: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -174,17 +179,6 @@ enum EntryClass {
         is_junction: bool,
         target: Option<PathBuf>,
     },
-}
-
-#[derive(Debug)]
-struct RootPlan {
-    source: PathBuf,
-    target: PathBuf,
-    directories: Vec<PathBuf>,
-    files: Vec<FileWork>,
-    links: Vec<LinkJob>,
-    bytes: u64,
-    items: u64,
 }
 
 struct ScanEmitter<'a> {
@@ -216,6 +210,102 @@ impl<'a> ScanEmitter<'a> {
             self.last = Instant::now();
         }
         Ok(())
+    }
+}
+
+struct Progress {
+    sender: Sender<EngineEvent>,
+    inner: Mutex<ProgressInner>,
+}
+
+struct ProgressInner {
+    last: Instant,
+    bytes: u64,
+    items: u64,
+    current: Option<PathBuf>,
+}
+
+impl Progress {
+    fn new(sender: Sender<EngineEvent>) -> Self {
+        Self {
+            sender,
+            inner: Mutex::new(ProgressInner {
+                last: Instant::now() - PROGRESS_EMIT_INTERVAL,
+                bytes: 0,
+                items: 0,
+                current: None,
+            }),
+        }
+    }
+
+    fn set_current(&self, path: PathBuf) {
+        let pending = {
+            let mut inner = self.inner.lock().expect("progress mutex poisoned");
+            inner.current = Some(path);
+            take_progress(&mut inner, false)
+        };
+        emit_progress(&self.sender, pending);
+    }
+
+    fn add_bytes(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let pending = {
+            let mut inner = self.inner.lock().expect("progress mutex poisoned");
+            inner.bytes += bytes;
+            take_progress(&mut inner, false)
+        };
+        emit_progress(&self.sender, pending);
+    }
+
+    fn add_items(&self, items: u64) {
+        if items == 0 {
+            return;
+        }
+        let pending = {
+            let mut inner = self.inner.lock().expect("progress mutex poisoned");
+            inner.items += items;
+            take_progress(&mut inner, false)
+        };
+        emit_progress(&self.sender, pending);
+    }
+
+    fn flush(&self) {
+        let pending = {
+            let mut inner = self.inner.lock().expect("progress mutex poisoned");
+            take_progress(&mut inner, true)
+        };
+        emit_progress(&self.sender, pending);
+    }
+}
+
+fn take_progress(inner: &mut ProgressInner, force: bool) -> Option<(u64, u64, Option<PathBuf>)> {
+    if !force && inner.last.elapsed() < PROGRESS_EMIT_INTERVAL {
+        return None;
+    }
+    let bytes = mem::take(&mut inner.bytes);
+    let items = mem::take(&mut inner.items);
+    let current = inner.current.take();
+    if bytes == 0 && items == 0 && current.is_none() {
+        return None;
+    }
+    inner.last = Instant::now();
+    Some((bytes, items, current))
+}
+
+fn emit_progress(sender: &Sender<EngineEvent>, pending: Option<(u64, u64, Option<PathBuf>)>) {
+    let Some((bytes, items, current)) = pending else {
+        return;
+    };
+    if bytes > 0 {
+        let _ = sender.send(EngineEvent::BytesDone(bytes));
+    }
+    if items > 0 {
+        let _ = sender.send(EngineEvent::ItemsDone(items));
+    }
+    if let Some(path) = current {
+        let _ = sender.send(EngineEvent::Current(path));
     }
 }
 
@@ -258,97 +348,216 @@ fn run_task(
     if request.kind == OperationKind::Delete {
         return run_delete(request, sender, control);
     }
+    run_copy_move(request, sender, control)
+}
 
+fn run_copy_move(
+    request: &TaskRequest,
+    sender: &Sender<EngineEvent>,
+    control: &Arc<Control>,
+) -> Result<()> {
     let t = strings(request);
-    let plans = build_plans(request, sender, control)?;
-    if control.cancelled.load(Ordering::Acquire) {
+    let destination = request.destination.as_ref().expect("validated destination");
+    let progress = Arc::new(Progress::new(sender.clone()));
+    let mut remaining = Vec::new();
+    let mut done_bytes = 0u64;
+    let mut done_items = 0u64;
+    for source in &request.sources {
+        if !control.wait() {
+            break;
+        }
+        let name = source
+            .file_name()
+            .ok_or_else(|| anyhow!("{}", t.source_name_unknown(source)))?;
+        let mut target = destination.join(name);
+        if request.settings.conflict_policy == ConflictPolicy::Rename && target.exists() {
+            target = unique_path(&target);
+        }
+        if request.kind == OperationKind::Move
+            && !target.exists()
+            && same_volume(source, &target)
+        {
+            progress.set_current(source.clone());
+            match fs::rename(source, &target) {
+                Ok(()) => {
+                    let mut scan = ScanEmitter::new(sender);
+                    let (bytes, items) = scan_path_totals(&target, &mut scan, control)?;
+                    done_bytes += bytes;
+                    done_items += items;
+                    progress.add_bytes(bytes);
+                    progress.add_items(items);
+                    continue;
+                }
+                Err(error) => {
+                    sender.send(EngineEvent::Error(t.move_fallback(source, &error)))?;
+                }
+            }
+        }
+        remaining.push((source.clone(), target));
+    }
+    if remaining.is_empty() {
+        progress.flush();
+        sender.send(EngineEvent::Started {
+            total_bytes: done_bytes,
+            total_items: done_items,
+        })?;
         sender.send(EngineEvent::Finished {
-            cancelled: true,
+            cancelled: control.cancelled.load(Ordering::Acquire),
             error_count: 0,
             skip_count: 0,
         })?;
         return Ok(());
     }
-    let total_bytes = plans.iter().map(|plan| plan.bytes).sum();
-    let total_items = plans.iter().map(|plan| plan.items).sum();
-    sender.send(EngineEvent::Started {
-        total_bytes,
-        total_items,
-    })?;
 
-    let mut error_count = 0;
-    let mut skip_count = 0;
-    let mut remaining_plans = Vec::new();
-    for plan in plans {
-        if !control.wait() {
-            break;
-        }
-        if request.kind == OperationKind::Move
-            && !plan.target.exists()
-            && same_volume(&plan.source, &plan.target)
-        {
-            sender.send(EngineEvent::Current(plan.source.clone()))?;
-            match fs::rename(&plan.source, &plan.target) {
-                Ok(()) => {
-                    sender.send(EngineEvent::BytesDone(plan.bytes))?;
-                    sender.send(EngineEvent::ItemsDone(plan.items))?;
-                    continue;
-                }
-                Err(error) => {
-                    sender.send(EngineEvent::Error(t.move_fallback(&plan.source, &error)))?;
-                }
-            }
-        }
-        remaining_plans.push(plan);
-    }
-
-    let mut directories = Vec::new();
-    let mut files = Vec::new();
+    let errors = Arc::new(AtomicUsize::new(0));
+    let skips = Arc::new(AtomicUsize::new(0));
     let mut links = Vec::new();
-    for plan in &remaining_plans {
-        directories.extend(plan.directories.iter().cloned());
-        files.extend(plan.files.iter().cloned());
-        links.extend(plan.links.iter().cloned());
-    }
-    directories.sort_by_key(|path| path.components().count());
-    directories.dedup();
-    for directory in &directories {
-        if !control.wait() {
-            break;
-        }
-        match fs::create_dir_all(directory) {
-            Ok(()) => sender.send(EngineEvent::ItemsDone(1))?,
-            Err(error) => {
-                error_count += 1;
-                sender.send(EngineEvent::Error(t.cannot_create_dir(directory, &error)))?;
+    let mut move_directories = Vec::new();
+    let mut total_bytes = done_bytes;
+    let mut total_items = done_items;
+    thread::scope(|scope| {
+        let (small_sender, small_receiver) = unbounded::<FileWork>();
+        let (large_sender, large_receiver) = unbounded::<FileWork>();
+        spawn_copy_workers(
+            scope,
+            small_receiver,
+            request.settings.worker_count,
+            false,
+            request,
+            sender,
+            control,
+            &progress,
+            &errors,
+            &skips,
+        );
+        spawn_copy_workers(
+            scope,
+            large_receiver,
+            1,
+            true,
+            request,
+            sender,
+            control,
+            &progress,
+            &errors,
+            &skips,
+        );
+        let mut scan = ScanEmitter::new(sender);
+        for (source, target) in &remaining {
+            if !control.wait() {
+                break;
+            }
+            let mut hardlinks = HashMap::new();
+            let mut skip_reparse = Vec::new();
+            let delete_source = request.kind == OperationKind::Move;
+            let follow = request.settings.link_policy == LinkPolicy::Follow;
+            if source.is_dir() {
+                match fs::create_dir_all(target) {
+                    Ok(()) => {
+                        total_items += 1;
+                        progress.add_items(1);
+                        let _ = scan.add(0, 1, source, false);
+                    }
+                    Err(error) => {
+                        errors.fetch_add(1, Ordering::Relaxed);
+                        let _ = sender.send(EngineEvent::Error(t.cannot_create_dir(target, &error)));
+                    }
+                }
+                if delete_source {
+                    move_directories.push(source.clone());
+                }
+                for entry in walk_copy_source(source, request) {
+                    if !control.wait() {
+                        break;
+                    }
+                    let (path, is_dir) = match entry {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let _ = sender
+                                .send(EngineEvent::Error(t.scan_failed(source, &error)));
+                            continue;
+                        }
+                    };
+                    if path == *source {
+                        continue;
+                    }
+                    if skip_reparse
+                        .iter()
+                        .any(|prefix: &PathBuf| path.starts_with(prefix))
+                    {
+                        continue;
+                    }
+                    if !follow {
+                        if let EntryClass::Reparse { is_dir: true, .. } = classify_path(&path) {
+                            skip_reparse.push(path.clone());
+                        }
+                    }
+                    let relative = match path.strip_prefix(source) {
+                        Ok(relative) => relative,
+                        Err(_) => continue,
+                    };
+                    let entry_target = target.join(relative);
+                    let _ = plan_entry(
+                        request.settings.link_policy,
+                        &path,
+                        is_dir,
+                        entry_target,
+                        delete_source,
+                        &mut hardlinks,
+                        &small_sender,
+                        &large_sender,
+                        &mut links,
+                        &mut total_bytes,
+                        &mut total_items,
+                        &mut scan,
+                        &progress,
+                        sender,
+                        t,
+                        &errors,
+                    );
+                    if delete_source && is_dir {
+                        move_directories.push(path);
+                    }
+                }
+            } else {
+                let _ = plan_entry(
+                    request.settings.link_policy,
+                    source,
+                    source.is_dir(),
+                    target.clone(),
+                    delete_source,
+                    &mut hardlinks,
+                    &small_sender,
+                    &large_sender,
+                    &mut links,
+                    &mut total_bytes,
+                    &mut total_items,
+                    &mut scan,
+                    &progress,
+                    sender,
+                    t,
+                    &errors,
+                );
             }
         }
-    }
+        let _ = scan.add(0, 0, destination, true);
+        let _ = sender.send(EngineEvent::Started {
+            total_bytes,
+            total_items,
+        });
+    });
 
-    let (file_errors, file_skips) = run_file_workers(files, request, sender, control);
-    error_count += file_errors;
-    skip_count += file_skips;
-    error_count += create_link_jobs(links, request, sender, control);
-
+    progress.flush();
+    let mut error_count = errors.load(Ordering::Relaxed);
+    let skip_count = skips.load(Ordering::Relaxed);
+    error_count += create_link_jobs(links, request, sender, control, &progress);
     if request.kind == OperationKind::Move && !control.cancelled.load(Ordering::Acquire) {
-        let mut source_directories: Vec<PathBuf> = remaining_plans
-            .iter()
-            .flat_map(|plan| {
-                WalkDir::new(&plan.source)
-                    .contents_first(true)
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_type().is_dir())
-                    .map(|entry| entry.into_path())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        source_directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-        for directory in source_directories {
+        move_directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        for directory in move_directories {
             let _ = fs::remove_dir(&directory);
         }
     }
-
+    progress.flush();
     sender.send(EngineEvent::Finished {
         cancelled: control.cancelled.load(Ordering::Acquire),
         error_count,
@@ -688,12 +897,12 @@ fn run_retry(
             .map(|metadata| metadata.len())
             .unwrap_or(0);
         bytes += size;
-        files.push(FileWork {
-            source: item.source.clone(),
-            target: target.clone(),
+        files.push(file_work(
+            item.source.clone(),
+            target.clone(),
             size,
-            delete_source: item.delete_source,
-        });
+            item.delete_source,
+        ));
     }
     sender.send(EngineEvent::Started {
         total_bytes: bytes,
@@ -749,106 +958,25 @@ fn validate_request(request: &TaskRequest) -> Result<()> {
     Ok(())
 }
 
-fn build_plans(
-    request: &TaskRequest,
-    sender: &Sender<EngineEvent>,
-    control: &Arc<Control>,
-) -> Result<Vec<RootPlan>> {
-    let t = strings(request);
-    let destination = request.destination.as_ref().expect("validated destination");
-    let mut plans = Vec::new();
-    let mut scan = ScanEmitter::new(sender);
-    for source in &request.sources {
-        if !control.wait() {
-            break;
+fn file_work(source: PathBuf, target: PathBuf, size: u64, delete_source: bool) -> FileWork {
+    let (sparse, attributes) = match fs::metadata(&source) {
+        Ok(meta) => {
+            let attributes = meta.file_attributes();
+            (
+                attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0,
+                attributes,
+            )
         }
-        let name = source
-            .file_name()
-            .ok_or_else(|| anyhow!("{}", t.source_name_unknown(source)))?;
-        let mut target = destination.join(name);
-        if request.settings.conflict_policy == ConflictPolicy::Rename && target.exists() {
-            target = unique_path(&target);
-        }
-
-        let mut directories = Vec::new();
-        let mut files = Vec::new();
-        let mut links = Vec::new();
-        let mut hardlinks = HashMap::new();
-        let mut skip_reparse = Vec::new();
-        let mut bytes = 0;
-        let mut items = 0;
-        let delete_source = request.kind == OperationKind::Move;
-        let follow = request.settings.link_policy == LinkPolicy::Follow;
-        if source.is_dir() {
-            directories.push(target.clone());
-            scan.add(0, 1, source, false)?;
-            items += 1;
-            for entry in walk_copy_source(source, request) {
-                if !control.wait() {
-                    break;
-                }
-                let (path, is_dir) =
-                    entry.map_err(|error| anyhow!("{}", t.scan_failed(source, &error)))?;
-                if path == *source {
-                    continue;
-                }
-                if skip_reparse
-                    .iter()
-                    .any(|prefix: &PathBuf| path.starts_with(prefix))
-                {
-                    continue;
-                }
-                if !follow {
-                    if let EntryClass::Reparse { is_dir: true, .. } = classify_path(&path) {
-                        skip_reparse.push(path.clone());
-                    }
-                }
-                let relative = path.strip_prefix(source)?;
-                let entry_target = target.join(relative);
-                plan_entry(
-                    request.settings.link_policy,
-                    &path,
-                    is_dir,
-                    entry_target,
-                    delete_source,
-                    &mut hardlinks,
-                    &mut directories,
-                    &mut files,
-                    &mut links,
-                    &mut bytes,
-                    &mut items,
-                    &mut scan,
-                )?;
-            }
-        } else {
-            let entry_target = target.clone();
-            plan_entry(
-                request.settings.link_policy,
-                source,
-                source.is_dir(),
-                entry_target,
-                delete_source,
-                &mut hardlinks,
-                &mut directories,
-                &mut files,
-                &mut links,
-                &mut bytes,
-                &mut items,
-                &mut scan,
-            )?;
-        }
-        plans.push(RootPlan {
-            source: source.clone(),
-            target,
-            directories,
-            files,
-            links,
-            bytes,
-            items,
-        });
+        Err(_) => (false, FILE_ATTRIBUTE_NORMAL),
+    };
+    FileWork {
+        source,
+        target,
+        size,
+        delete_source,
+        sparse,
+        attributes,
     }
-    scan.add(0, 0, destination, true)?;
-    Ok(plans)
 }
 
 fn run_file_workers(
@@ -857,74 +985,74 @@ fn run_file_workers(
     sender: &Sender<EngineEvent>,
     control: &Arc<Control>,
 ) -> (usize, usize) {
-    let mut small = Vec::new();
-    let mut large = Vec::new();
-    for file in files {
-        if file.size >= LARGE_FILE_BYTES {
-            large.push(file);
-        } else {
-            small.push(file);
-        }
-    }
     let errors = Arc::new(AtomicUsize::new(0));
     let skips = Arc::new(AtomicUsize::new(0));
+    let progress = Arc::new(Progress::new(sender.clone()));
     thread::scope(|scope| {
-        if !small.is_empty() {
-            spawn_copy_workers(
-                scope,
-                small,
-                request.settings.worker_count,
-                false,
-                request,
-                sender,
-                control,
-                &errors,
-                &skips,
-            );
-        }
-        if !large.is_empty() {
-            spawn_copy_workers(
-                scope,
-                large,
-                1,
-                true,
-                request,
-                sender,
-                control,
-                &errors,
-                &skips,
-            );
+        let (small_sender, small_receiver) = unbounded();
+        let (large_sender, large_receiver) = unbounded();
+        spawn_copy_workers(
+            scope,
+            small_receiver,
+            request.settings.worker_count,
+            false,
+            request,
+            sender,
+            control,
+            &progress,
+            &errors,
+            &skips,
+        );
+        spawn_copy_workers(
+            scope,
+            large_receiver,
+            1,
+            true,
+            request,
+            sender,
+            control,
+            &progress,
+            &errors,
+            &skips,
+        );
+        for file in files {
+            submit_file(&small_sender, &large_sender, file);
         }
     });
+    progress.flush();
     (
         errors.load(Ordering::Relaxed),
         skips.load(Ordering::Relaxed),
     )
 }
 
+fn submit_file(small: &Sender<FileWork>, large: &Sender<FileWork>, work: FileWork) {
+    let sender = if work.sparse || work.size < LARGE_FILE_BYTES {
+        small
+    } else {
+        large
+    };
+    let _ = sender.send(work);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_copy_workers<'scope>(
     scope: &'scope thread::Scope<'scope, '_>,
-    files: Vec<FileWork>,
+    receiver: Receiver<FileWork>,
     worker_count: usize,
     unbuffered: bool,
     request: &'scope TaskRequest,
     sender: &'scope Sender<EngineEvent>,
     control: &'scope Arc<Control>,
+    progress: &'scope Arc<Progress>,
     errors: &'scope Arc<AtomicUsize>,
     skips: &'scope Arc<AtomicUsize>,
 ) {
-    let (work_sender, work_receiver) = unbounded::<FileWork>();
-    for work in files {
-        if work_sender.send(work).is_err() {
-            break;
-        }
-    }
-    drop(work_sender);
     for _ in 0..worker_count.clamp(1, 64) {
-        let receiver = work_receiver.clone();
+        let receiver = receiver.clone();
         let event_sender = sender.clone();
         let worker_control = Arc::clone(control);
+        let progress = Arc::clone(progress);
         let errors = Arc::clone(errors);
         let skips = Arc::clone(skips);
         let conflict_policy = request.settings.conflict_policy;
@@ -932,11 +1060,12 @@ fn spawn_copy_workers<'scope>(
         let skip_unchanged = request.settings.skip_unchanged;
         let t = strings(request);
         scope.spawn(move || {
+            let mut buffer = Vec::new();
             while let Ok(work) = receiver.recv() {
                 if !worker_control.wait() {
                     break;
                 }
-                let _ = event_sender.send(EngineEvent::Current(work.source.clone()));
+                progress.set_current(work.source.clone());
                 match copy_one(
                     &work,
                     conflict_policy,
@@ -945,7 +1074,9 @@ fn spawn_copy_workers<'scope>(
                     unbuffered,
                     t,
                     &event_sender,
+                    &progress,
                     &worker_control,
+                    &mut buffer,
                 ) {
                     Ok(CopyOutcome::Copied) => {
                         if work.delete_source
@@ -962,12 +1093,12 @@ fn spawn_copy_workers<'scope>(
                                 t.copied_but_cannot_delete_source(&work.source, &error),
                             );
                         }
-                        let _ = event_sender.send(EngineEvent::ItemsDone(1));
+                        progress.add_items(1);
                     }
                     Ok(CopyOutcome::Skipped) => {
                         skips.fetch_add(1, Ordering::Relaxed);
-                        let _ = event_sender.send(EngineEvent::BytesDone(work.size));
-                        let _ = event_sender.send(EngineEvent::ItemsDone(1));
+                        progress.add_bytes(work.size);
+                        progress.add_items(1);
                     }
                     Err(error) => {
                         if worker_control.cancelled.load(Ordering::Acquire)
@@ -1015,58 +1146,68 @@ fn copy_one(
     unbuffered: bool,
     strings: &Strings,
     sender: &Sender<EngineEvent>,
+    progress: &Progress,
     control: &Arc<Control>,
+    buffer: &mut Vec<u8>,
 ) -> Result<CopyOutcome> {
     if !control.wait() {
         bail!("{}", strings.cancelled());
     }
     let mut target = work.target.clone();
-    let mut replace_existing = false;
-    if target.exists() {
-        if skip_unchanged && is_unchanged(&work.source, &target) {
-            return Ok(CopyOutcome::Skipped);
+    match copy_file_os(work, &target, unbuffered, strings, sender, progress, control, buffer) {
+        Ok(copied) => {
+            verify_copied_size(work.size, copied, verify_size, strings)?;
+            return Ok(CopyOutcome::Copied);
         }
-        match conflict_policy {
-            ConflictPolicy::Skip => return Ok(CopyOutcome::Skipped),
-            ConflictPolicy::Rename => target = unique_path(&target),
-            ConflictPolicy::Overwrite => replace_existing = true,
-        }
-    }
-
-    if replace_existing {
-        let temporary = next_temporary_path(&target);
-        if let Err(error) = copy_file_os(
-            &work.source,
-            &temporary,
-            work.size,
-            unbuffered,
-            strings,
-            sender,
-            control,
-        ) {
-            let _ = fs::remove_file(&temporary);
+        Err(error) if is_exists_error(&error) => {}
+        Err(error) => {
+            let _ = fs::remove_file(&target);
             return Err(error);
         }
-        verify_copied_size(&work.source, &temporary, verify_size, strings)?;
-        if target.exists() {
-            fs::remove_file(&target)?;
-        }
-        fs::rename(&temporary, &target)?;
-    } else if let Err(error) = copy_file_os(
-        &work.source,
-        &target,
-        work.size,
-        unbuffered,
-        strings,
-        sender,
-        control,
-    ) {
-        let _ = fs::remove_file(&target);
-        return Err(error);
-    } else {
-        verify_copied_size(&work.source, &target, verify_size, strings)?;
     }
-    Ok(CopyOutcome::Copied)
+    if skip_unchanged && is_unchanged(&work.source, &target) {
+        return Ok(CopyOutcome::Skipped);
+    }
+    match conflict_policy {
+        ConflictPolicy::Skip => return Ok(CopyOutcome::Skipped),
+        ConflictPolicy::Rename => target = unique_path(&target),
+        ConflictPolicy::Overwrite => {
+            let temporary = next_temporary_path(&target);
+            match copy_file_os(
+                work,
+                &temporary,
+                unbuffered,
+                strings,
+                sender,
+                progress,
+                control,
+                buffer,
+            ) {
+                Ok(copied) => {
+                    verify_copied_size(work.size, copied, verify_size, strings)?;
+                    if target.exists() {
+                        fs::remove_file(&target)?;
+                    }
+                    fs::rename(&temporary, &target)?;
+                    return Ok(CopyOutcome::Copied);
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(error);
+                }
+            }
+        }
+    }
+    match copy_file_os(work, &target, unbuffered, strings, sender, progress, control, buffer) {
+        Ok(copied) => {
+            verify_copied_size(work.size, copied, verify_size, strings)?;
+            Ok(CopyOutcome::Copied)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&target);
+            Err(error)
+        }
+    }
 }
 
 fn is_unchanged(source: &Path, target: &Path) -> bool {
@@ -1088,8 +1229,8 @@ fn is_unchanged(source: &Path, target: &Path) -> bool {
     target_time + MTIME_SLACK >= source_time
 }
 
-struct CopyCallbackState {
-    sender: Sender<EngineEvent>,
+struct CopyCallbackState<'a> {
+    progress: &'a Progress,
     control: Arc<Control>,
     last_bytes: AtomicU64,
 }
@@ -1114,85 +1255,90 @@ unsafe extern "system" fn copy_progress(
     let transferred = total_bytes_transferred.max(0) as u64;
     let last = state.last_bytes.swap(transferred, Ordering::Relaxed);
     if transferred > last {
-        let _ = state
-            .sender
-            .send(EngineEvent::BytesDone(transferred - last));
+        state.progress.add_bytes(transferred - last);
     }
     PROGRESS_CONTINUE
 }
 
+#[allow(clippy::too_many_arguments)]
 fn copy_file_os(
-    source: &Path,
+    work: &FileWork,
     target: &Path,
-    expected_size: u64,
     unbuffered: bool,
     strings: &Strings,
     sender: &Sender<EngineEvent>,
+    progress: &Progress,
     control: &Arc<Control>,
-) -> Result<()> {
-    if is_sparse_file(source) {
-        match copy_sparse_file(source, target, expected_size, strings, sender, control) {
-            Ok(()) => return Ok(()),
-            Err(error) if os_error_code(&error) == Some(ERROR_PATH_NOT_FOUND) => {
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                copy_sparse_file(source, target, expected_size, strings, sender, control)?;
-                return Ok(());
+    buffer: &mut Vec<u8>,
+) -> Result<u64> {
+    let _ = sender;
+    match copy_file_os_once(work, target, unbuffered, strings, progress, control, buffer) {
+        Ok(copied) => Ok(copied),
+        Err(error) if os_error_code(&error) == Some(ERROR_PATH_NOT_FOUND) => {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
             }
+            copy_file_os_once(work, target, unbuffered, strings, progress, control, buffer)
+        }
+        Err(error)
+            if unbuffered && !is_cancel_error(&error) && !is_lock_error(&error) && !is_exists_error(&error) =>
+        {
+            copy_file_os_once(work, target, false, strings, progress, control, buffer)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_file_os_once(
+    work: &FileWork,
+    target: &Path,
+    unbuffered: bool,
+    strings: &Strings,
+    progress: &Progress,
+    control: &Arc<Control>,
+    buffer: &mut Vec<u8>,
+) -> Result<u64> {
+    if work.sparse {
+        match copy_sparse_file(
+            &work.source,
+            target,
+            work.size,
+            work.attributes,
+            strings,
+            progress,
+            control,
+        ) {
+            Ok(copied) => return Ok(copied),
             Err(error) if sparse_unsupported(&error) => {
                 let _ = fs::remove_file(target);
             }
             Err(error) => return Err(error),
         }
     }
-    let mut flags = COPY_FILE_ALLOW_DECRYPTED_DESTINATION | COPY_FILE_FAIL_IF_EXISTS;
     if unbuffered {
+        let mut flags = COPY_FILE_ALLOW_DECRYPTED_DESTINATION | COPY_FILE_FAIL_IF_EXISTS;
         flags |= COPY_FILE_NO_BUFFERING;
+        return copy_file_ex(
+            &work.source,
+            target,
+            work.size,
+            flags,
+            strings,
+            progress,
+            control,
+        );
     }
-    match copy_file_ex(
-        source,
+    copy_file_buffered(
+        &work.source,
         target,
-        expected_size,
-        flags,
+        work.size,
+        work.attributes,
         strings,
-        sender,
+        progress,
         control,
-    ) {
-        Ok(()) => Ok(()),
-        Err(error) if os_error_code(&error) == Some(ERROR_PATH_NOT_FOUND) => {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            copy_file_ex(
-                source,
-                target,
-                expected_size,
-                flags,
-                strings,
-                sender,
-                control,
-            )
-        }
-        Err(error) if unbuffered && !is_cancel_error(&error) && !is_lock_error(&error) => {
-            copy_file_ex(
-                source,
-                target,
-                expected_size,
-                COPY_FILE_ALLOW_DECRYPTED_DESTINATION | COPY_FILE_FAIL_IF_EXISTS,
-                strings,
-                sender,
-                control,
-            )
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn is_sparse_file(path: &Path) -> bool {
-    let wide = path_to_wide(path);
-    let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
-    attributes != INVALID_FILE_ATTRIBUTES && attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0
+        buffer,
+    )
 }
 
 fn sparse_unsupported(error: &anyhow::Error) -> bool {
@@ -1247,10 +1393,11 @@ fn copy_sparse_file(
     source: &Path,
     target: &Path,
     expected_size: u64,
+    attributes: u32,
     strings: &Strings,
-    sender: &Sender<EngineEvent>,
+    progress: &Progress,
     control: &Arc<Control>,
-) -> Result<()> {
+) -> Result<u64> {
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     let source_handle = open_file(
         source,
@@ -1300,51 +1447,17 @@ fn copy_sparse_file(
         &target_handle,
         file_size,
         strings,
-        sender,
+        progress,
         control,
     )?;
-    let mut created = FILETIME {
-        dwLowDateTime: 0,
-        dwHighDateTime: 0,
-    };
-    let mut accessed = FILETIME {
-        dwLowDateTime: 0,
-        dwHighDateTime: 0,
-    };
-    let mut written = FILETIME {
-        dwLowDateTime: 0,
-        dwHighDateTime: 0,
-    };
-    let ok = unsafe {
-        GetFileTime(
-            source_handle.0,
-            &mut created,
-            &mut accessed,
-            &mut written,
-        )
-    };
-    if ok != 0 {
-        let _ = unsafe {
-            SetFileTime(
-                target_handle.0,
-                &created,
-                &accessed,
-                &written,
-            )
-        };
-    }
+    copy_timestamps(&source_handle, &target_handle);
     drop(source_handle);
     drop(target_handle);
-    let source_wide = path_to_wide(source);
-    let attributes = unsafe { GetFileAttributesW(source_wide.as_ptr()) };
-    if attributes != INVALID_FILE_ATTRIBUTES {
-        let target_wide = path_to_wide(target);
-        let _ = unsafe { SetFileAttributesW(target_wide.as_ptr(), attributes) };
-    }
+    apply_attributes(target, attributes);
     if expected_size > copied {
-        sender.send(EngineEvent::BytesDone(expected_size - copied))?;
+        progress.add_bytes(expected_size - copied);
     }
-    Ok(())
+    Ok(copied.max(expected_size))
 }
 
 fn copy_allocated_ranges(
@@ -1352,7 +1465,7 @@ fn copy_allocated_ranges(
     target: &OwnedHandle,
     file_size: i64,
     strings: &Strings,
-    sender: &Sender<EngineEvent>,
+    progress: &Progress,
     control: &Arc<Control>,
 ) -> Result<u64> {
     if file_size <= 0 {
@@ -1401,7 +1514,7 @@ fn copy_allocated_ranges(
                 range.FileOffset as u64,
                 range.Length as u64,
                 strings,
-                sender,
+                progress,
                 control,
             )?;
         }
@@ -1426,7 +1539,7 @@ fn copy_file_range_bytes(
     offset: u64,
     length: u64,
     strings: &Strings,
-    sender: &Sender<EngineEvent>,
+    progress: &Progress,
     control: &Arc<Control>,
 ) -> Result<u64> {
     const CHUNK: usize = 1024 * 1024;
@@ -1483,7 +1596,7 @@ fn copy_file_range_bytes(
         if written != read {
             bail!("short sparse write");
         }
-        sender.send(EngineEvent::BytesDone(written as u64))?;
+        progress.add_bytes(written as u64);
         copied += written as u64;
         position += written as u64;
         remaining -= written as u64;
@@ -1497,13 +1610,13 @@ fn copy_file_ex(
     expected_size: u64,
     flags: u32,
     strings: &Strings,
-    sender: &Sender<EngineEvent>,
+    progress: &Progress,
     control: &Arc<Control>,
-) -> Result<()> {
+) -> Result<u64> {
     let source_wide = path_to_wide(source);
     let target_wide = path_to_wide(target);
     let state = CopyCallbackState {
-        sender: sender.clone(),
+        progress,
         control: Arc::clone(control),
         last_bytes: AtomicU64::new(0),
     };
@@ -1526,26 +1639,154 @@ fn copy_file_ex(
     }
     let copied = state.last_bytes.load(Ordering::Relaxed);
     if expected_size > copied {
-        sender.send(EngineEvent::BytesDone(expected_size - copied))?;
+        progress.add_bytes(expected_size - copied);
+    }
+    Ok(expected_size.max(copied))
+}
+
+fn copy_file_buffered(
+    source: &Path,
+    target: &Path,
+    expected_size: u64,
+    attributes: u32,
+    strings: &Strings,
+    progress: &Progress,
+    control: &Arc<Control>,
+    buffer: &mut Vec<u8>,
+) -> Result<u64> {
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let source_handle = open_file(
+        source,
+        FILE_GENERIC_READ,
+        share,
+        OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN,
+    )?;
+    let target_handle = open_file(
+        target,
+        FILE_GENERIC_WRITE,
+        share,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL,
+    )?;
+    if buffer.len() < SMALL_COPY_CHUNK {
+        buffer.resize(SMALL_COPY_CHUNK, 0);
+    }
+    let report_per_chunk = expected_size >= SMALL_COPY_CHUNK as u64;
+    let mut copied = 0u64;
+    loop {
+        if !control.wait() {
+            bail!("{}", strings.cancelled());
+        }
+        let mut read = 0u32;
+        let ok = unsafe {
+            ReadFile(
+                source_handle.0,
+                buffer.as_mut_ptr(),
+                SMALL_COPY_CHUNK as u32,
+                &mut read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(last_os_error());
+        }
+        if read == 0 {
+            break;
+        }
+        let mut written = 0u32;
+        let ok = unsafe {
+            WriteFile(
+                target_handle.0,
+                buffer.as_ptr(),
+                read,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(last_os_error());
+        }
+        if written != read {
+            bail!("short write");
+        }
+        copied += written as u64;
+        if report_per_chunk {
+            progress.add_bytes(written as u64);
+        }
+    }
+    copy_timestamps(&source_handle, &target_handle);
+    drop(source_handle);
+    drop(target_handle);
+    apply_attributes(target, attributes);
+    if !report_per_chunk {
+        progress.add_bytes(copied);
+    } else if expected_size > copied {
+        progress.add_bytes(expected_size - copied);
+    }
+    Ok(copied)
+}
+
+fn copy_timestamps(source: &OwnedHandle, target: &OwnedHandle) {
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut accessed = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut written = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let ok = unsafe {
+        GetFileTime(
+            source.0,
+            &mut created,
+            &mut accessed,
+            &mut written,
+        )
+    };
+    if ok != 0 {
+        let _ = unsafe { SetFileTime(target.0, &created, &accessed, &written) };
+    }
+}
+
+fn apply_attributes(path: &Path, attributes: u32) {
+    let masked = attributes
+        & !FILE_ATTRIBUTE_DIRECTORY
+        & !FILE_ATTRIBUTE_REPARSE_POINT
+        & !FILE_ATTRIBUTE_SPARSE_FILE;
+    if masked == 0 {
+        return;
+    }
+    let wide = path_to_wide(path);
+    let _ = unsafe { SetFileAttributesW(wide.as_ptr(), masked) };
+}
+
+fn verify_copied_size(expected: u64, copied: u64, verify_size: bool, strings: &Strings) -> Result<()> {
+    if !verify_size {
+        return Ok(());
+    }
+    if copied != expected {
+        bail!("{}", strings.verify_size_failed());
     }
     Ok(())
 }
 
-fn verify_copied_size(
-    source: &Path,
-    target: &Path,
-    verify_size: bool,
-    strings: &Strings,
-) -> Result<()> {
-    if !verify_size {
-        return Ok(());
-    }
-    let source_len = fs::metadata(source)?.len();
-    let target_len = fs::metadata(target)?.len();
-    if source_len != target_len {
-        bail!("{}", strings.verify_size_failed());
-    }
-    Ok(())
+fn is_exists_error(error: &anyhow::Error) -> bool {
+    matches!(
+        os_error_code(error),
+        Some(ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS)
+    )
+}
+
+#[cfg(test)]
+fn is_sparse_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|meta| meta.file_attributes() & FILE_ATTRIBUTE_SPARSE_FILE != 0)
+        .unwrap_or(false)
 }
 
 fn os_error_code(error: &anyhow::Error) -> Option<u32> {
@@ -1620,73 +1861,40 @@ fn run_delete(
     control: &Arc<Control>,
 ) -> Result<()> {
     let t = strings(request);
-    let mut scan = ScanEmitter::new(sender);
-    let mut files = Vec::new();
-    let mut directories = Vec::new();
-    let mut recycle_sources = Vec::new();
-    for source in &request.sources {
-        if !control.wait() {
-            break;
-        }
-        if request.settings.delete_mode == DeleteMode::RecycleBin {
+    if request.settings.delete_mode == DeleteMode::RecycleBin {
+        let mut scan = ScanEmitter::new(sender);
+        let mut recycle_sources = Vec::new();
+        for source in &request.sources {
+            if !control.wait() {
+                break;
+            }
             let (bytes, items) = scan_path_totals(source, &mut scan, control)?;
             recycle_sources.push((source.clone(), bytes, items));
-            continue;
         }
-        if source.is_dir() {
-            for entry in WalkDir::new(source).contents_first(true) {
-                if !control.wait() {
-                    break;
-                }
-                match entry {
-                    Ok(entry) if entry.file_type().is_dir() => {
-                        scan.add(0, 1, entry.path(), false)?;
-                        directories.push(entry.into_path());
-                    }
-                    Ok(entry) => {
-                        let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-                        scan.add(size, 1, entry.path(), false)?;
-                        files.push((entry.into_path(), size));
-                    }
-                    Err(error) => {
-                        sender.send(EngineEvent::Error(t.scan_failed(source, &error)))?;
-                    }
-                }
-            }
-        } else {
-            let size = source
-                .metadata()
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            scan.add(size, 1, source, false)?;
-            files.push((source.clone(), size));
+        scan.add(0, 0, Path::new(""), true)?;
+        if control.cancelled.load(Ordering::Acquire) {
+            sender.send(EngineEvent::Finished {
+                cancelled: true,
+                error_count: 0,
+                skip_count: 0,
+            })?;
+            return Ok(());
         }
-    }
-    scan.add(0, 0, Path::new(""), true)?;
-    if control.cancelled.load(Ordering::Acquire) {
-        sender.send(EngineEvent::Finished {
-            cancelled: true,
-            error_count: 0,
-            skip_count: 0,
+        sender.send(EngineEvent::Started {
+            total_bytes: scan.bytes,
+            total_items: scan.items,
         })?;
-        return Ok(());
-    }
-    sender.send(EngineEvent::Started {
-        total_bytes: scan.bytes,
-        total_items: scan.items,
-    })?;
-
-    let mut error_count = 0;
-    if request.settings.delete_mode == DeleteMode::RecycleBin {
+        let mut error_count = 0;
+        let progress = Progress::new(sender.clone());
         for (source, bytes, items) in recycle_sources {
             if !control.wait() {
                 break;
             }
-            sender.send(EngineEvent::Current(source.clone()))?;
+            progress.set_current(source.clone());
             match trash::delete(&source) {
                 Ok(()) => {
-                    sender.send(EngineEvent::BytesDone(bytes))?;
-                    sender.send(EngineEvent::ItemsDone(items))?;
+                    progress.add_bytes(bytes);
+                    progress.add_items(items);
                 }
                 Err(error) => {
                     error_count += 1;
@@ -1702,72 +1910,118 @@ fn run_delete(
                 }
             }
         }
-    } else {
-        let (file_sender, file_receiver) = unbounded();
-        for file in files {
-            let _ = file_sender.send(file);
-        }
-        drop(file_sender);
-        let errors = Arc::new(Mutex::new(0usize));
-        thread::scope(|scope| {
-            for _ in 0..request.settings.worker_count.clamp(1, 64) {
-                let receiver = file_receiver.clone();
-                let event_sender = sender.clone();
-                let worker_control = Arc::clone(control);
-                let errors = Arc::clone(&errors);
-                scope.spawn(move || {
-                    while let Ok((path, size)) = receiver.recv() {
-                        if !worker_control.wait() {
-                            break;
+        progress.flush();
+        sender.send(EngineEvent::Finished {
+            cancelled: control.cancelled.load(Ordering::Acquire),
+            error_count,
+            skip_count: 0,
+        })?;
+        return Ok(());
+    }
+
+    let progress = Arc::new(Progress::new(sender.clone()));
+    let errors = Arc::new(AtomicUsize::new(0));
+    let mut directories = Vec::new();
+    let mut scan = ScanEmitter::new(sender);
+    thread::scope(|scope| {
+        let (file_sender, file_receiver) = unbounded::<(PathBuf, u64)>();
+        for _ in 0..request.settings.worker_count.clamp(1, 64) {
+            let receiver = file_receiver.clone();
+            let event_sender = sender.clone();
+            let worker_control = Arc::clone(control);
+            let progress = Arc::clone(&progress);
+            let errors = Arc::clone(&errors);
+            scope.spawn(move || {
+                while let Ok((path, size)) = receiver.recv() {
+                    if !worker_control.wait() {
+                        break;
+                    }
+                    progress.set_current(path.clone());
+                    match fs::remove_file(&path) {
+                        Ok(()) => {
+                            progress.add_bytes(size);
+                            progress.add_items(1);
                         }
-                        let _ = event_sender.send(EngineEvent::Current(path.clone()));
-                        match fs::remove_file(&path) {
-                            Ok(()) => {
-                                let _ = event_sender.send(EngineEvent::BytesDone(size));
-                                let _ = event_sender.send(EngineEvent::ItemsDone(1));
+                        Err(error) => {
+                            if worker_control.cancelled.load(Ordering::Acquire) {
+                                break;
                             }
-                            Err(error) => {
-                                if worker_control.cancelled.load(Ordering::Acquire) {
-                                    break;
-                                }
-                                *errors.lock().expect("error mutex poisoned") += 1;
-                                let io_error = anyhow::Error::from(error);
-                                let message = if is_lock_error(&io_error) {
-                                    t.file_locked(&path)
-                                } else {
-                                    t.cannot_delete(&path, &io_error)
-                                };
-                                send_failed(
-                                    &event_sender,
-                                    RetryItem {
-                                        source: path,
-                                        target: None,
-                                        delete_source: false,
-                                    },
-                                    message,
-                                );
-                            }
+                            errors.fetch_add(1, Ordering::Relaxed);
+                            let io_error = anyhow::Error::from(error);
+                            let message = if is_lock_error(&io_error) {
+                                t.file_locked(&path)
+                            } else {
+                                t.cannot_delete(&path, &io_error)
+                            };
+                            send_failed(
+                                &event_sender,
+                                RetryItem {
+                                    source: path,
+                                    target: None,
+                                    delete_source: false,
+                                },
+                                message,
+                            );
                         }
                     }
-                });
-            }
-        });
-        error_count += *errors.lock().expect("error mutex poisoned");
-        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-        for directory in directories {
+                }
+            });
+        }
+        for source in &request.sources {
             if !control.wait() {
                 break;
             }
-            match fs::remove_dir(&directory) {
-                Ok(()) => sender.send(EngineEvent::ItemsDone(1))?,
-                Err(error) => {
-                    error_count += 1;
-                    sender.send(EngineEvent::Error(t.cannot_delete_dir(&directory, &error)))?;
+            if source.is_dir() {
+                for entry in WalkDir::new(source).contents_first(true) {
+                    if !control.wait() {
+                        break;
+                    }
+                    match entry {
+                        Ok(entry) if entry.file_type().is_dir() => {
+                            let _ = scan.add(0, 1, entry.path(), false);
+                            directories.push(entry.into_path());
+                        }
+                        Ok(entry) => {
+                            let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                            let _ = scan.add(size, 1, entry.path(), false);
+                            let _ = file_sender.send((entry.into_path(), size));
+                        }
+                        Err(error) => {
+                            let _ = sender.send(EngineEvent::Error(t.scan_failed(source, &error)));
+                        }
+                    }
                 }
+            } else {
+                let size = source
+                    .metadata()
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                let _ = scan.add(size, 1, source, false);
+                let _ = file_sender.send((source.clone(), size));
+            }
+        }
+        let _ = scan.add(0, 0, Path::new(""), true);
+        let _ = sender.send(EngineEvent::Started {
+            total_bytes: scan.bytes,
+            total_items: scan.items,
+        });
+    });
+    progress.flush();
+    let mut error_count = errors.load(Ordering::Relaxed);
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        if !control.wait() {
+            break;
+        }
+        match fs::remove_dir(&directory) {
+            Ok(()) => progress.add_items(1),
+            Err(error) => {
+                error_count += 1;
+                sender.send(EngineEvent::Error(t.cannot_delete_dir(&directory, &error)))?;
             }
         }
     }
-
+    progress.flush();
     sender.send(EngineEvent::Finished {
         cancelled: control.cancelled.load(Ordering::Acquire),
         error_count,
@@ -1965,12 +2219,16 @@ fn plan_entry(
     entry_target: PathBuf,
     delete_source: bool,
     hardlinks: &mut HashMap<(u32, u64), PathBuf>,
-    directories: &mut Vec<PathBuf>,
-    files: &mut Vec<FileWork>,
+    small: &Sender<FileWork>,
+    large: &Sender<FileWork>,
     links: &mut Vec<LinkJob>,
     bytes: &mut u64,
     items: &mut u64,
     scan: &mut ScanEmitter,
+    progress: &Progress,
+    sender: &Sender<EngineEvent>,
+    t: &Strings,
+    errors: &AtomicUsize,
 ) -> Result<()> {
     match (policy, classify_path(path)) {
         (LinkPolicy::Ignore, EntryClass::HardLink { .. } | EntryClass::Reparse { .. }) => {
@@ -2023,21 +2281,41 @@ fn plan_entry(
         _ => {}
     }
     if is_dir {
-        directories.push(entry_target);
-        *items += 1;
-        scan.add(0, 1, path, false)?;
+        match fs::create_dir_all(&entry_target) {
+            Ok(()) => {
+                *items += 1;
+                progress.add_items(1);
+                scan.add(0, 1, path, false)?;
+            }
+            Err(error) => {
+                errors.fetch_add(1, Ordering::Relaxed);
+                let _ = sender.send(EngineEvent::Error(t.cannot_create_dir(&entry_target, &error)));
+            }
+        }
         return Ok(());
     }
-    let size = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    let meta = fs::metadata(path).ok();
+    let size = meta.as_ref().map(|metadata| metadata.len()).unwrap_or(0);
+    let attributes = meta
+        .as_ref()
+        .map(|metadata| metadata.file_attributes())
+        .unwrap_or(FILE_ATTRIBUTE_NORMAL);
+    let sparse = attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0;
     *bytes += size;
     *items += 1;
     scan.add(size, 1, path, false)?;
-    files.push(FileWork {
-        source: path.to_path_buf(),
-        target: entry_target,
-        size,
-        delete_source,
-    });
+    submit_file(
+        small,
+        large,
+        FileWork {
+            source: path.to_path_buf(),
+            target: entry_target,
+            size,
+            delete_source,
+            sparse,
+            attributes,
+        },
+    );
     Ok(())
 }
 
@@ -2046,6 +2324,7 @@ fn create_link_jobs(
     request: &TaskRequest,
     sender: &Sender<EngineEvent>,
     control: &Arc<Control>,
+    progress: &Progress,
 ) -> usize {
     let t = strings(request);
     let mut errors = 0;
@@ -2053,7 +2332,7 @@ fn create_link_jobs(
         if !control.wait() {
             break;
         }
-        let _ = sender.send(EngineEvent::Current(job.dest.clone()));
+        progress.set_current(job.dest.clone());
         let result = match &job.kind {
             LinkJobKind::HardLink { existing } => create_hard_link(&job.dest, existing),
             LinkJobKind::Symlink { target, is_dir } => {
@@ -2073,7 +2352,7 @@ fn create_link_jobs(
                         fs::remove_file(&job.source)
                     };
                 }
-                let _ = sender.send(EngineEvent::ItemsDone(1));
+                progress.add_items(1);
             }
             Err(error) => {
                 errors += 1;
@@ -2318,6 +2597,47 @@ mod tests {
             b"fastcopy"
         );
         assert!(source.exists());
+    }
+
+    #[test]
+    fn copies_empty_file_and_empty_dir() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("源目录");
+        let destination = root.path().join("目标");
+        fs::create_dir_all(source.join("空目录")).unwrap();
+        fs::write(source.join("空文件.txt"), b"").unwrap();
+        let request = TaskRequest {
+            kind: OperationKind::Copy,
+            sources: vec![source.clone()],
+            destination: Some(destination.clone()),
+            settings: test_settings(),
+            retry_items: Vec::new(),
+        };
+        assert_eq!(wait_for_task(start(request)), 0);
+        let copied = destination.join("源目录");
+        assert!(copied.join("空目录").is_dir());
+        assert_eq!(fs::read(copied.join("空文件.txt")).unwrap(), b"");
+    }
+
+    #[test]
+    fn copies_small_file_preserves_mtime() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("小文件.txt");
+        let destination = root.path().join("目标");
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(&source, b"hello-fastcopy").unwrap();
+        let source_mtime = fs::metadata(&source).unwrap().modified().unwrap();
+        let request = TaskRequest {
+            kind: OperationKind::Copy,
+            sources: vec![source],
+            destination: Some(destination.clone()),
+            settings: test_settings(),
+            retry_items: Vec::new(),
+        };
+        assert_eq!(wait_for_task(start(request)), 0);
+        let dest = destination.join("小文件.txt");
+        assert_eq!(fs::read(&dest).unwrap(), b"hello-fastcopy");
+        assert_eq!(fs::metadata(&dest).unwrap().modified().unwrap(), source_mtime);
     }
 
     #[test]

@@ -3,10 +3,17 @@
 Each item is English, then Chinese.
 每条先写英文，再写中文。
 
-## v1.0.1 (2026-08-26 ~ 28)
+## v1.0.2 (2026-08-28)
 
+- Version 1.0.2, with `node pack.js` producing `release/fastcopy_1.0.2.7z`.
+  版本号 1.0.2；`node pack.js` 一键打包为 `release/fastcopy_1.0.2.7z`。
+- Speed up many-small-file copy: `ReadFile`/`WriteFile` instead of `CopyFileEx`, skip extra per-file stats, overlap scan with copy/delete, and coalesce progress events. Same HDD `node_modules` copy median 1.48 s → 0.93 s (~12× Explorer paste).
+  加快大量小文件复制：小文件改走 `ReadFile`/`WriteFile`、去掉多余的逐文件查询、边扫边拷/删、进度事件合并。同一机械盘 `node_modules` 复制中位数 1.48 s → 0.93 s（约比资源管理器粘贴快 12 倍）。
 - Add an Explorer vs FastCopy copy/delete benchmark on a `node_modules` tree (`benchmark.md`); README links to it.
   增加与资源管理器复制/删除的对照测试（`node_modules`，见 `benchmark.md`）；README 增加链接。
+
+## v1.0.1 (2026-08-26 ~ 27)
+
 - Refresh README / README.zh.md for v1.0.1 (CLI section, settings path, changelog link). Ignore Windows shortcuts and IDE junk in `.gitignore`.
   按 v1.0.1 更新 README / README.zh.md（命令行、设置路径、更新日志链接）。`.gitignore` 忽略快捷方式和 IDE 临时文件。
 - Show the package version in the main window title bar (e.g. `快速复制 1.0.1` / `FastCopy 1.0.1`).

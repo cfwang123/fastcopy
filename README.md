@@ -1,6 +1,6 @@
 # FastCopy
 
-Version **1.0.1**. [中文说明](README.zh.md) · [Changelog](CHANGELOG.md) · [Benchmark](benchmark.md)
+Version **1.0.2**. [中文说明](README.zh.md) · [Changelog](CHANGELOG.md) · [Benchmark](benchmark.md)
 
 A Windows 10/11 Rust file tool for copying, moving, and deleting large numbers of files. It uses a file-level concurrent queue, which works well for directories with many small files. Moves on the same volume prefer a filesystem rename.
 
@@ -9,7 +9,7 @@ A Windows 10/11 Rust file tool for copying, moving, and deleting large numbers o
 - Copy, move, and delete files and folders
 - Opening the app shows Settings; Explorer menu tasks show only the progress window
 - Chinese/English UI language switch in Settings (labels in the language dropdown stay `中文` / `English`)
-- Window title bar shows the package version (e.g. `FastCopy 1.0.1`)
+- Window title bar shows the package version (e.g. `FastCopy 1.0.2`)
 - Scan progress before copy/move/delete starts
 - Choose files and destinations from the Explorer context menu
 - Preserve NTFS sparse-file holes instead of writing them as real zeros
@@ -19,7 +19,7 @@ A Windows 10/11 Rust file tool for copying, moving, and deleting large numbers o
 - When copying folders, optional gitignore-style skip using a named ignore file (default `.gitignore`)
 - Hard links, symbolic links, and directory junctions: ignore (default), follow target, or preserve as links
 - Recycle Bin by default, with optional permanent delete
-- Optional file-size check after copy; CopyFileEx keeps last-write time, last-access time, and basic attributes
+- Optional file-size check after copy; last-write time, last-access time, and basic attributes are kept
 - Files ≥ 64 MiB use a dedicated worker and unbuffered CopyFileEx
 - Locked/in-use files are skipped and listed at the end for retry
 - Explorer cascade for the current user (no admin): Quick Cut, Quick Copy, Quick Delete, copy as symbolic or hard link, Open link target, View source path, and Settings
@@ -92,16 +92,16 @@ cargo build --release
 node pack.js
 ```
 
-The executable is `target/release/fastcopy.exe`. `node pack.js` builds Release and writes `release/fastcopy_1.0.1.7z` (the `x.x.x` comes from `Cargo.toml`). Release builds use OpenGL (glow), LTO, and symbol stripping to keep size down.
+The executable is `target/release/fastcopy.exe`. `node pack.js` builds Release and writes `release/fastcopy_1.0.2.7z` (the `x.x.x` comes from `Cargo.toml`). Release builds use OpenGL (glow), LTO, and symbol stripping to keep size down.
 
 ## Performance notes
 
 Measured against Explorer copy/paste and permanent delete: [benchmark.md](benchmark.md).
 
-On a same-volume HDD `node_modules` tree (4019 files, 61 MiB, average ~15.5 KiB), FastCopy 1.0.1 with 16 workers copied about **8×** faster than Explorer paste (median 1.48 s vs 11.72 s) and permanently deleted about **2×** faster (0.97 s vs 2.02 s). Explorer paste was timed with the same `IFileOperation` engine Explorer uses (no UI). A single large file is still usually limited by the disk and cache; FastCopy is not guaranteed to win that case.
+On a same-volume HDD `node_modules` tree (4019 files, 61 MiB, average ~15.5 KiB), FastCopy 1.0.2 with 16 workers copied about **12×** faster than Explorer paste (median 0.93 s vs 11.47 s) and permanently deleted about **2×** faster (1.02 s vs 2.02 s). Explorer paste was timed with the same `IFileOperation` engine Explorer uses (no UI). A single large file is still usually limited by the disk and cache; FastCopy is not guaranteed to win that case.
 
 - Many small files are limited by random disk I/O, antivirus scans, and filesystem metadata. Raising concurrency often helps.
-- Copy uses concurrent Windows `CopyFileEx` for small files. Files ≥ 64 MiB run on one worker with `COPY_FILE_NO_BUFFERING` (falls back if that flag is rejected).
+- Copy uses concurrent `ReadFile`/`WriteFile` for small files, overlapped with the tree scan. Files ≥ 64 MiB run on one worker with unbuffered `CopyFileEx` (falls back if that flag is rejected).
 - Avoid very high concurrency on HDDs; try 2–4. On SSD/NVMe, start from the default.
 - Recycle Bin work is done by Windows Shell; progress updates after each top-level item.
 
