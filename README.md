@@ -28,8 +28,8 @@ Right-click one or more files, folders, or a mix. Commands are under the **FastC
 - **Quick Cut** — Put the selection on FastCopy’s own clipboard (not the Windows text clipboard). Paste later on a folder background to move.
 - **Quick Copy** — Same clipboard, paste later to copy.
 - **Quick Delete** — Delete using the mode saved in Settings (Recycle Bin by default, or permanent delete with a confirmation).
-- **Copy as symbolic link** — Remember the selection as a symbolic-link paste. Then use the folder-background paste command.
-- **Copy as hard link** — Remember the selection as a hard-link paste. Then use the folder-background paste command.
+- **Copy as symbolic link** — Remember the selection as a symbolic-link paste. Then paste on a folder background. Windows may prompt once for administrator approval; see [Symbolic and hard links](#symbolic-and-hard-links).
+- **Copy as hard link** — Remember the selection as a hard-link paste. Then paste on a folder background (same volume only; no UAC).
 - **Open link target** — Only when a single shortcut (`.lnk`), symbolic link, or directory junction is selected. Opens Explorer at the real target.
 - **View source path** — Same single-link condition. Shows the path (the real target for those links) with Copy path and Open path.
 - **Folder size** — Scan the selection and show file count, folder count, and bytes.
@@ -41,14 +41,26 @@ Right-click one or more files, folders, or a mix. Commands are under the **FastC
 
 Right-click empty space inside a folder. These items appear only after a Quick Cut, Quick Copy, or link-copy, and are hidden again after a normal paste or cancel.
 
-- **Quick Paste** — Paste into this folder from FastCopy’s clipboard. A copy or cut opens the progress window. After a link-copy the label is **Paste as symbolic link** / **Paste as hard link**, or **Paste (N files) as …** when more than one item was copied; that paste runs in the background with no progress window and no finish toast. On failure a message box shows the reason. Creating a symbolic link without Developer Mode prompts once for administrator approval (UAC), then retries. Hold Shift while clicking to keep the clipboard and paste again. A cut still clears it, because the source is gone.
+- **Quick Paste** — Paste into this folder from FastCopy’s clipboard. A copy or cut opens the progress window. After a link-copy the label is **Paste as symbolic link** / **Paste as hard link**, or **Paste (N files) as …** when more than one item was copied; that paste runs in the background with no progress window. Hold Shift while clicking to keep the clipboard and paste again. A cut still clears it, because the source is gone.
 - **Cancel Cut/Copy** — Clear the pending list without pasting.
 
-Paste as symbolic link creates one link per top-level item pointing at the original path (directories use a directory symbolic link; creating symbolic links may need Developer Mode, or a one-time UAC elevation). Paste as hard link creates hard links for files; for a folder it recreates the tree and hard-links each file (same volume only). If the destination name already exists, the new link is named with a trailing ` 2`, ` 3`, ` 4`, … and the existing file is left unchanged.
+## Symbolic and hard links
+
+**Paste as symbolic link** creates one link per top-level item pointing at the original path (directories use a directory symbolic link). Success is silent (no toast). Failure opens a message box with the Windows error.
+
+Creating a symbolic link is restricted on Windows. FastCopy first tries as the current user. If that fails with “privilege not held” (error 1314) or access denied (error 5), it prompts **UAC once** for the whole batch and retries as administrator. Canceling UAC leaves the original error on screen.
+
+To skip the UAC prompt, turn on **Developer Mode** (Windows 10: Settings → Update & Security → For developers; Windows 11: Settings → System → For developers). After that, unelevated `CreateSymbolicLink` is allowed.
+
+**Paste as hard link** creates hard links for files; for a folder it recreates the tree and hard-links each file. Hard links require the same volume and do **not** need Developer Mode or UAC.
+
+If the destination name already exists, the new link is named with a trailing ` 2`, ` 3`, ` 4`, … and the existing file is left unchanged. This numbering applies to both symbolic and hard-link paste.
+
+Copy/move with Settings **Preserve as links** still recreates symbolic links in-process (no UAC helper). That path may still need Developer Mode, or an elevated FastCopy. Directory junctions are recreated as junctions and do not need that privilege.
 
 ## After a command runs
 
-Opening the app with no menu task shows Settings. Save settings and Close stay visible at the bottom. Copy, move, and delete show only the progress window (scan, speed, time remaining, pause/cancel). The window closes on success; a toast is shown if that option is enabled in Settings. The toast is sent as FastCopy, not PowerShell. The window stays open if there were errors so you can retry or export the list. Symbolic/hard-link paste does not toast; failures open a message box with the error. Symbolic-link paste that fails with a missing privilege prompts UAC and retries elevated.
+Opening the app with no menu task shows Settings. Save settings and Close stay visible at the bottom. Copy, move, and delete show only the progress window (scan, speed, time remaining, pause/cancel). The window closes on success; a toast is shown if that option is enabled in Settings. The toast is sent as FastCopy, not PowerShell. The window stays open if there were errors so you can retry or export the list. Symbolic/hard-link paste does not toast; see [Symbolic and hard links](#symbolic-and-hard-links).
 
 Permanent delete does not use the Recycle Bin; the app asks for confirmation first (CLI: skip with `--yes`). Cancelling a copy removes unfinished new destination files. Overwrites write a temporary file first, then replace, so the original stays until replacement finishes.
 
@@ -126,7 +138,7 @@ Headline numbers are at the top of this page. Method, environment, and per-round
 
 - First release is Windows 10/11 x64 only.
 - Ignore files apply only when copying folders, not when copying individual files or when moving/deleting.
-- Hard links / symlinks / junctions default to skip; follow copies target content; preserve recreates links (directory junctions are recreated as junctions; creating symbolic links may need Developer Mode).
+- Hard links / symlinks / junctions default to skip; follow copies target content; preserve recreates links (directory junctions are recreated as junctions). Explorer **Paste as symbolic link** prompts UAC if Developer Mode is off; copy/move Preserve still needs Developer Mode or an elevated process.
 - Verification checks size, not a content hash.
 - NTFS ACLs and alternate data streams are not copied. If the destination volume does not support sparse files, the copy is written as a normal file.
 - In-use or sharing-locked files are skipped, listed at the end, and can be retried. Other permission or security failures stay in the same list.
