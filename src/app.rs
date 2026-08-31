@@ -656,10 +656,6 @@ impl FastCopyApp {
                 );
             });
         ui.checkbox(&mut self.settings.notify_on_finish, t.notify_on_finish);
-        ui.checkbox(
-            &mut self.settings.notify_on_link_finish,
-            t.notify_on_link_finish,
-        );
         ui.separator();
         ui.label(t.shell_status(self.shell_user, self.shell_machine));
         ui.horizontal_wrapped(|ui| {

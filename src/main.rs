@@ -275,6 +275,7 @@ fn wait_for_engine(
     kind: OperationKind,
     notify: bool,
 ) -> Result<i32> {
+    let mut errors = Vec::new();
     loop {
         match handle.recv() {
             Some(EngineEvent::Finished {
@@ -282,7 +283,11 @@ fn wait_for_engine(
                 error_count,
                 skip_count,
             }) => {
-                if notify {
+                if kind.is_link_paste() {
+                    if !cancelled && error_count > 0 {
+                        show_error_dialog(t, t.operation(kind), &errors, error_count);
+                    }
+                } else if notify {
                     crate::notify::finished(t, kind, cancelled, error_count);
                 }
                 let code = cli::exit_code(cancelled, error_count, skip_count);
@@ -297,11 +302,36 @@ fn wait_for_engine(
             }
             Some(EngineEvent::Error(error) | EngineEvent::Failed { message: error, .. }) => {
                 eprintln!("{error}");
+                if errors.len() < 50 {
+                    errors.push(error);
+                }
             }
             Some(_) => {}
             None => return Err(anyhow!("{}", t.engine_stopped())),
         }
     }
+}
+
+fn show_error_dialog(
+    t: &crate::i18n::Strings,
+    title: &str,
+    errors: &[String],
+    error_count: usize,
+) {
+    let mut body = if errors.is_empty() {
+        t.finished_with_errors(error_count)
+    } else {
+        errors.join("\n")
+    };
+    if errors.len() < error_count {
+        body.push('\n');
+        body.push_str(&t.finished_with_errors(error_count));
+    }
+    let _ = rfd::MessageDialog::new()
+        .set_title(title)
+        .set_description(&body)
+        .set_level(rfd::MessageLevel::Error)
+        .show();
 }
 
 fn argument_path(arguments: &[String], t: &crate::i18n::Strings) -> Result<PathBuf> {

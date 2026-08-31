@@ -55,8 +55,6 @@ pub struct Settings {
     pub language: Language,
     #[serde(default = "default_true")]
     pub notify_on_finish: bool,
-    #[serde(default = "default_true")]
-    pub notify_on_link_finish: bool,
 }
 
 impl Default for Settings {
@@ -74,19 +72,19 @@ impl Default for Settings {
             delete_mode: DeleteMode::RecycleBin,
             language: Language::default(),
             notify_on_finish: true,
-            notify_on_link_finish: true,
         }
+    }
+}
+
+impl OperationKind {
+    pub fn is_link_paste(self) -> bool {
+        matches!(self, Self::CopyAsSymlink | Self::CopyAsHardlink)
     }
 }
 
 impl Settings {
     pub fn notify_when_done(&self, kind: OperationKind) -> bool {
-        match kind {
-            OperationKind::CopyAsSymlink | OperationKind::CopyAsHardlink => {
-                self.notify_on_link_finish
-            }
-            _ => self.notify_on_finish,
-        }
+        !kind.is_link_paste() && self.notify_on_finish
     }
 }
 
@@ -149,11 +147,10 @@ mod tests {
     fn notify_when_done_respects_kind() {
         let mut settings = Settings::default();
         assert!(settings.notify_when_done(OperationKind::Copy));
-        assert!(settings.notify_when_done(OperationKind::CopyAsSymlink));
+        assert!(!settings.notify_when_done(OperationKind::CopyAsSymlink));
+        assert!(!settings.notify_when_done(OperationKind::CopyAsHardlink));
         settings.notify_on_finish = false;
         assert!(!settings.notify_when_done(OperationKind::Move));
-        assert!(settings.notify_when_done(OperationKind::CopyAsHardlink));
-        settings.notify_on_link_finish = false;
         assert!(!settings.notify_when_done(OperationKind::CopyAsHardlink));
     }
 
@@ -161,6 +158,5 @@ mod tests {
     fn missing_notify_fields_default_on() {
         let settings: Settings = serde_json::from_str(r#"{"worker_count":4}"#).unwrap();
         assert!(settings.notify_on_finish);
-        assert!(settings.notify_on_link_finish);
     }
 }

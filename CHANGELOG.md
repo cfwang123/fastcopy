@@ -5,8 +5,12 @@ Each version section is English, then Chinese.
 
 ## unreleased
 
+- Symbolic/hard-link paste no longer shows a finish toast. On failure, a message box lists the error (Win32 text; privilege 1314 mentions Developer Mode).
+- Remove the Settings toggle for the symbolic/hard-link finish toast.
 - Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
 
+- 符号/硬链接粘贴成功后不再弹右下角通知；失败时弹出窗口说明原因（含 Win32 说明；1314 会提示需要开发人员模式）。
+- 去掉设置里的「符号/硬链接完成提示」。
 - 「参数设置」右键图标改为灰色齿轮。下次启动会覆盖已安装的图标。
 
 ## v1.0.3 (2026-08-28)

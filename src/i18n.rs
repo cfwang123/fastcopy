@@ -24,7 +24,6 @@ pub struct Strings {
     pub recycle_bin: &'static str,
     pub permanent: &'static str,
     pub notify_on_finish: &'static str,
-    pub notify_on_link_finish: &'static str,
     pub shell_menu: &'static str,
     pub registered: &'static str,
     pub registered_machine: &'static str,
@@ -118,7 +117,6 @@ pub const ZH: Strings = Strings {
     recycle_bin: "移入回收站",
     permanent: "永久删除",
     notify_on_finish: "完成时提示",
-    notify_on_link_finish: "符号/硬链接完成提示",
     shell_menu: "资源管理器右键菜单",
     registered: "已注册（当前用户）",
     registered_machine: "已注册（全机，需管理员卸载）",
@@ -212,7 +210,6 @@ pub const EN: Strings = Strings {
     recycle_bin: "Recycle Bin",
     permanent: "Permanent delete",
     notify_on_finish: "Notify when finished",
-    notify_on_link_finish: "Notify when symbolic/hard link finishes",
     shell_menu: "Explorer context menu",
     registered: "Registered (this user)",
     registered_machine: "Registered (all users; admin to uninstall)",
@@ -706,10 +703,24 @@ impl Strings {
     }
 
     pub fn cannot_create_link(&self, path: &Path, error: &impl std::fmt::Display) -> String {
-        if self.en() {
-            format!("Cannot create link {}: {error}", path.display())
+        let error = error.to_string();
+        let hint = if error.contains("(os error 1314)") {
+            self.symlink_privilege_hint()
         } else {
-            format!("无法创建链接 {}：{error}", path.display())
+            ""
+        };
+        if self.en() {
+            format!("Cannot create link {}: {error}{hint}", path.display())
+        } else {
+            format!("无法创建链接 {}：{error}{hint}", path.display())
+        }
+    }
+
+    pub fn symlink_privilege_hint(&self) -> &'static str {
+        if self.en() {
+            " Creating a symbolic link needs Windows Developer Mode, or run as administrator."
+        } else {
+            " 创建符号链接需要打开 Windows「开发人员模式」，或以管理员身份运行。"
         }
     }
 
@@ -935,4 +946,21 @@ impl Strings {
 
 pub fn strings(language: Language) -> &'static Strings {
     language.strings()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn cannot_create_link_mentions_developer_mode_on_1314() {
+        let path = Path::new(r"D:\目标\a.txt");
+        let zh = ZH.cannot_create_link(path, &"access denied (os error 1314)");
+        assert!(zh.contains("开发人员模式"), "{zh}");
+        let en = EN.cannot_create_link(path, &"access denied (os error 1314)");
+        assert!(en.contains("Developer Mode"), "{en}");
+        let other = ZH.cannot_create_link(path, &"not found (os error 2)");
+        assert!(!other.contains("开发人员模式"), "{other}");
+    }
 }

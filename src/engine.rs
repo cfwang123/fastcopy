@@ -2374,7 +2374,7 @@ fn create_hard_link(dest: &Path, existing: &Path) -> Result<()> {
     let existing_wide = path_to_wide(existing);
     let ok = unsafe { CreateHardLinkW(dest_wide.as_ptr(), existing_wide.as_ptr(), std::ptr::null()) };
     if ok == 0 {
-        bail!("CreateHardLinkW {}", unsafe { GetLastError() });
+        return Err(last_os_error());
     }
     Ok(())
 }
@@ -2405,7 +2405,7 @@ fn create_symbolic_link(dest: &Path, target: &Path, is_dir: bool) -> Result<()> 
         };
         let retry = unsafe { CreateSymbolicLinkW(dest_wide.as_ptr(), target_wide.as_ptr(), flags) };
         if !retry {
-            bail!("CreateSymbolicLinkW {}", unsafe { GetLastError() });
+            return Err(last_os_error());
         }
     }
     Ok(())
