@@ -1,4 +1,4 @@
-use crate::model::{OperationKind, Settings, TaskRequest};
+use crate::model::{OperationKind, RetryItem, Settings, TaskRequest};
 use crate::windows::explorer_sel;
 use anyhow::{Context, Result, anyhow};
 use fs2::FileExt;
@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, GetLastError, WAIT_FAILED};
-use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
 use windows_sys::Win32::UI::Shell::{
     SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHCNE_ASSOCCHANGED, SHCNE_UPDATEDIR, SHCNF_FLUSH,
     SHCNF_IDLIST, SHCNF_PATHW, SHChangeNotify, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE};
 
@@ -545,17 +545,70 @@ fn hive_has(hive: winreg::HKEY, path: &str) -> bool {
 }
 
 pub fn elevate(argument: &str) -> Result<()> {
+    let _ = elevate_command(argument, SW_SHOWNORMAL)?;
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct ElevateLinkJob {
+    items: Vec<ElevateLinkItem>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ElevateLinkItem {
+    source: PathBuf,
+    target: PathBuf,
+}
+
+pub fn write_elevate_link_job(items: &[RetryItem]) -> Result<PathBuf> {
+    let directory = app_data_directory();
+    fs::create_dir_all(&directory)?;
+    let path = directory.join(format!("elevate-links-{}.json", std::process::id()));
+    let job = ElevateLinkJob {
+        items: items
+            .iter()
+            .filter_map(|item| {
+                Some(ElevateLinkItem {
+                    source: item.source.clone(),
+                    target: item.target.clone()?,
+                })
+            })
+            .collect(),
+    };
+    fs::write(&path, serde_json::to_vec_pretty(&job)?)?;
+    Ok(path)
+}
+
+pub fn read_elevate_link_job(path: &Path) -> Result<Vec<RetryItem>> {
+    let job: ElevateLinkJob = serde_json::from_slice(&fs::read(path)?)?;
+    Ok(job
+        .items
+        .into_iter()
+        .map(|item| RetryItem {
+            source: item.source,
+            target: Some(item.target),
+            delete_source: false,
+        })
+        .collect())
+}
+
+pub fn elevate_links(job_path: &Path) -> Result<u32> {
+    let path = job_path.to_string_lossy().replace('"', "");
+    elevate_command(&format!("--elevated-links \"{path}\""), SW_HIDE)
+}
+
+fn elevate_command(parameters: &str, show: i32) -> Result<u32> {
     let executable = env::current_exe()?;
     let executable = wide(executable.as_os_str());
     let verb = wide(OsStr::new("runas"));
-    let parameters = wide(OsStr::new(argument));
+    let parameters = wide(OsStr::new(parameters));
     let mut info = SHELLEXECUTEINFOW {
         cbSize: mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
         lpVerb: verb.as_ptr(),
         lpFile: executable.as_ptr(),
         lpParameters: parameters.as_ptr(),
-        nShow: SW_SHOWNORMAL,
+        nShow: show,
         ..Default::default()
     };
     let ok = unsafe { ShellExecuteExW(&mut info) };
@@ -566,17 +619,24 @@ pub fn elevate(argument: &str) -> Result<()> {
         }
         return Err(anyhow!("{}", ui_strings().uac_start_failed(code)));
     }
-    if !info.hProcess.is_null() {
-        unsafe {
-            if WaitForSingleObject(info.hProcess, INFINITE) == WAIT_FAILED {
-                let code = GetLastError();
-                CloseHandle(info.hProcess);
-                return Err(anyhow!("{}", ui_strings().uac_wait_failed(code)));
-            }
-            CloseHandle(info.hProcess);
-        }
+    if info.hProcess.is_null() {
+        return Ok(0);
     }
-    Ok(())
+    unsafe {
+        if WaitForSingleObject(info.hProcess, INFINITE) == WAIT_FAILED {
+            let code = GetLastError();
+            CloseHandle(info.hProcess);
+            return Err(anyhow!("{}", ui_strings().uac_wait_failed(code)));
+        }
+        let mut exit_code = 0u32;
+        let ok = GetExitCodeProcess(info.hProcess, &mut exit_code);
+        CloseHandle(info.hProcess);
+        if ok == 0 {
+            let code = GetLastError();
+            return Err(anyhow!("{}", ui_strings().uac_wait_failed(code)));
+        }
+        Ok(exit_code)
+    }
 }
 
 fn clipboard_has_items() -> bool {

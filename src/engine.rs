@@ -1132,6 +1132,10 @@ fn send_failed(sender: &Sender<EngineEvent>, item: RetryItem, message: String) {
     let _ = sender.send(EngineEvent::Failed { item, message });
 }
 
+pub fn link_error_needs_elevation(message: &str) -> bool {
+    message.contains("(os error 1314)") || message.contains("(os error 5)")
+}
+
 enum CopyOutcome {
     Copied,
     Skipped,
@@ -2540,6 +2544,15 @@ mod tests {
     fn unique_path_returns_original_when_available() {
         let path = PathBuf::from("definitely-not-existing-fastcopy-test.txt");
         assert_eq!(unique_path(&path), path);
+    }
+
+    #[test]
+    fn link_error_needs_elevation_detects_privilege() {
+        assert!(link_error_needs_elevation(
+            "无法创建链接 x：客户端没有所需的特权。 (os error 1314)"
+        ));
+        assert!(link_error_needs_elevation("access denied (os error 5)"));
+        assert!(!link_error_needs_elevation("not found (os error 2)"));
     }
 
     #[test]

@@ -13,8 +13,9 @@ use anyhow::{Result, anyhow};
 use app::{FastCopyApp, SETTINGS_MIN_SIZE, SETTINGS_SIZE};
 use engine::{EngineEvent, EngineHandle};
 use i18n::strings;
-use model::{DeleteMode, OperationKind, Settings, TaskRequest};
+use model::{DeleteMode, OperationKind, RetryItem, Settings, TaskRequest};
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 use windows::shell_menu::{self, ClipboardKind, PendingCommand};
 
@@ -69,7 +70,7 @@ fn run() -> Result<i32> {
             let sources = paths[..paths.len() - 1].to_vec();
             let mut settings = app::load_settings();
             cli::apply_options(&mut settings, &options);
-            return run_headless(kind, sources, Some(destination), settings, t);
+            return run_headless(kind, sources, Some(destination), settings, Vec::new(), t, false);
         }
         Some("--delete") => {
             let (options, paths) = cli::parse_options(&arguments[2..], t)?;
@@ -84,7 +85,7 @@ fn run() -> Result<i32> {
             {
                 return Ok(cli::EXIT_CANCELLED);
             }
-            return run_headless(OperationKind::Delete, paths, None, settings, t);
+            return run_headless(OperationKind::Delete, paths, None, settings, Vec::new(), t, false);
         }
         Some("--register-shell") => {
             shell_menu::register()?;
@@ -134,12 +135,15 @@ fn run() -> Result<i32> {
             if shell_menu::clipboard_is_link_copy() {
                 let settings = app::load_settings();
                 let request = shell_menu::clipboard_task(destination, settings, keep)?;
+                let elevate_if_needed = request.kind == OperationKind::CopyAsSymlink;
                 return run_headless(
                     request.kind,
                     request.sources,
                     request.destination,
                     request.settings,
+                    request.retry_items,
                     t,
+                    elevate_if_needed,
                 );
             }
             let command = if keep {
@@ -148,6 +152,21 @@ fn run() -> Result<i32> {
                 PendingCommand::Paste(destination)
             };
             shell_menu::append_pending(&command)?;
+        }
+        Some("--elevated-links") => {
+            let job = argument_path(&arguments, t)?;
+            let items = shell_menu::read_elevate_link_job(&job)?;
+            let _ = fs::remove_file(&job);
+            let settings = app::load_settings();
+            return run_headless(
+                OperationKind::CopyAsSymlink,
+                Vec::new(),
+                None,
+                settings,
+                items,
+                t,
+                false,
+            );
         }
         Some("--shell-delete") => {
             let path = argument_path(&arguments, t)?;
@@ -252,7 +271,9 @@ fn run_headless(
     sources: Vec<PathBuf>,
     destination: Option<PathBuf>,
     settings: Settings,
+    retry_items: Vec<RetryItem>,
     t: &crate::i18n::Strings,
+    elevate_if_needed: bool,
 ) -> Result<i32> {
     let notify = settings.notify_when_done(kind);
     wait_for_engine(
@@ -261,11 +282,12 @@ fn run_headless(
             sources,
             destination,
             settings,
-            retry_items: Vec::new(),
+            retry_items,
         }),
         t,
         kind,
         notify,
+        elevate_if_needed,
     )
 }
 
@@ -274,8 +296,10 @@ fn wait_for_engine(
     t: &crate::i18n::Strings,
     kind: OperationKind,
     notify: bool,
+    elevate_if_needed: bool,
 ) -> Result<i32> {
-    let mut errors = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut failed: Vec<(RetryItem, String)> = Vec::new();
     loop {
         match handle.recv() {
             Some(EngineEvent::Finished {
@@ -283,24 +307,56 @@ fn wait_for_engine(
                 error_count,
                 skip_count,
             }) => {
+                if elevate_if_needed && !cancelled {
+                    let privilege: Vec<RetryItem> = failed
+                        .iter()
+                        .filter(|(_, message)| engine::link_error_needs_elevation(message))
+                        .map(|(item, _)| item.clone())
+                        .collect();
+                    if !privilege.is_empty() {
+                        match retry_symlink_elevated(&privilege) {
+                            Ok(0) => {
+                                failed.retain(|(_, message)| {
+                                    !engine::link_error_needs_elevation(message)
+                                });
+                            }
+                            Ok(code) => return Ok(code),
+                            Err(error) => {
+                                let message = format!("{error:#}");
+                                if message != t.uac_cancelled() {
+                                    errors.push(message);
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut all_errors: Vec<String> = failed.into_iter().map(|(_, message)| message).collect();
+                all_errors.extend(errors);
+                let remaining = all_errors.len();
                 if kind.is_link_paste() {
-                    if !cancelled && error_count > 0 {
-                        show_error_dialog(t, t.operation(kind), &errors, error_count);
+                    if !cancelled && remaining > 0 {
+                        show_error_dialog(t, t.operation(kind), &all_errors, remaining);
                     }
                 } else if notify {
                     crate::notify::finished(t, kind, cancelled, error_count);
                 }
-                let code = cli::exit_code(cancelled, error_count, skip_count);
+                let code = cli::exit_code(cancelled, remaining, skip_count);
                 if cancelled {
                     eprintln!("{}", t.cancelled());
-                } else if error_count > 0 {
-                    eprintln!("{}", t.finished_with_errors(error_count));
+                } else if remaining > 0 {
+                    eprintln!("{}", t.finished_with_errors(remaining));
                 } else if skip_count > 0 {
                     eprintln!("{}", t.finished_with_skips(skip_count));
                 }
                 return Ok(code);
             }
-            Some(EngineEvent::Error(error) | EngineEvent::Failed { message: error, .. }) => {
+            Some(EngineEvent::Failed { item, message }) => {
+                eprintln!("{message}");
+                if failed.len() < 50 {
+                    failed.push((item, message));
+                }
+            }
+            Some(EngineEvent::Error(error)) => {
                 eprintln!("{error}");
                 if errors.len() < 50 {
                     errors.push(error);
@@ -310,6 +366,13 @@ fn wait_for_engine(
             None => return Err(anyhow!("{}", t.engine_stopped())),
         }
     }
+}
+
+fn retry_symlink_elevated(items: &[RetryItem]) -> Result<i32> {
+    let job = shell_menu::write_elevate_link_job(items)?;
+    let result = shell_menu::elevate_links(&job).map(|code| code as i32);
+    let _ = fs::remove_file(&job);
+    result
 }
 
 fn show_error_dialog(
