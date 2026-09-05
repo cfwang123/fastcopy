@@ -15,7 +15,7 @@ Explorer paste was timed with the same `IFileOperation` engine Explorer uses (no
 
 ## Install
 
-1. Put `fastcopy.exe` in a folder that will stay put (not Downloads or a temporary extract you will delete). The Explorer menu records the full path of this EXE.
+1. Put `fastcopy.exe` and `fastcopy_shell.dll` in a folder that will stay put (not Downloads or a temporary extract you will delete). The Explorer menu records the full path of this EXE and DLL.
 2. Start `fastcopy.exe`. Settings opens.
 3. Click **Register** (current user, no administrator).
 
@@ -23,7 +23,7 @@ After that, Explorer shows a **FastCopy** submenu on selected files and folders,
 
 ## Selected files and folders
 
-Right-click one or more files, folders, or a mix. Commands are under the **FastCopy** submenu. The app reads the current Explorer selection, so more than about 100 top-level items can be included.
+Right-click one or more files, folders, or a mix. Commands are under the **FastCopy** submenu. The submenu stays visible when more than 100 items are selected (Explorer hides ordinary registry verbs after that). The app reads the current Explorer selection so the command covers the whole selection.
 
 - **Quick Cut** — Put the selection on FastCopy’s own clipboard (not the Windows text clipboard). Paste later on a folder background to move.
 - **Quick Copy** — Same clipboard, paste later to copy.
@@ -123,7 +123,7 @@ cargo build --release
 node pack.js
 ```
 
-The executable is `target/release/fastcopy.exe`. `node pack.js` builds Release and writes `release/fastcopy_1.0.3.7z` (the `x.x.x` comes from `Cargo.toml`). Release builds use OpenGL (glow), LTO, and symbol stripping to keep size down.
+The executable is `target/release/fastcopy.exe`; a Release build also copies it and sibling `*.dll` to `release/`. `node pack.js` builds Release and writes `release/fastcopy_1.0.3.7z` (the `x.x.x` comes from `Cargo.toml`). Release builds use OpenGL (glow), LTO, and symbol stripping to keep size down.
 
 ## Performance notes
 

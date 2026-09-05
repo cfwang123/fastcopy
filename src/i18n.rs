@@ -919,6 +919,14 @@ impl Strings {
         }
     }
 
+    pub fn cannot_find_shell_dll(&self) -> &'static str {
+        if self.en() {
+            "fastcopy_shell.dll was not found next to the executable"
+        } else {
+            "程序同目录下找不到 fastcopy_shell.dll"
+        }
+    }
+
     pub fn uac_cancelled(&self) -> &'static str {
         if self.en() {
             "Administrator approval cancelled"

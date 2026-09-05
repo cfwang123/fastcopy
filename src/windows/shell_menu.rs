@@ -44,6 +44,9 @@ const CASCADE_RENAME: &str = r"shell\9rename";
 const CASCADE_SETTINGS: &str = r"shell\zsettings";
 const CASCADE_SEPARATOR_BEFORE: u32 = 0x20;
 const LINK_APPLIES_TO: &str = "System.FileExtension:.lnk OR System.FileAttributes:1024";
+const SHELL_CLSID: &str = "{B3E8D47A-6C1F-4A92-9E05-8F4C2B17A6D0}";
+const SHELL_DLL_NAME: &str = "fastcopy_shell.dll";
+const SHELL_HANDLER: &str = "FastCopyShell";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClipboardKind {
@@ -422,6 +425,7 @@ pub fn register() -> Result<()> {
 
 fn register_hive(hive: winreg::HKEY, classes: &str) -> Result<()> {
     write_cascade_keys(hive, classes)?;
+    write_com_keys(hive, classes)?;
     let root = RegKey::predef(hive);
     delete_if_exists(&root, &format!(r"{classes}\Directory\shell\FastCopyCut"))?;
     delete_if_exists(&root, &format!(r"{classes}\Directory\shell\FastCopyCopy"))?;
@@ -457,6 +461,121 @@ fn write_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
     Ok(())
 }
 
+fn shell_dll_path() -> Result<PathBuf> {
+    let executable = env::current_exe().context(ui_strings().cannot_get_exe_path())?;
+    let Some(directory) = executable.parent() else {
+        return Err(anyhow!("{}", ui_strings().cannot_get_exe_path()));
+    };
+    let next_to_exe = directory.join(SHELL_DLL_NAME);
+    if next_to_exe.is_file() {
+        return Ok(next_to_exe);
+    }
+    if directory
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("deps"))
+    {
+        if let Some(parent) = directory.parent() {
+            let sibling = parent.join(SHELL_DLL_NAME);
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
+        }
+    }
+    Ok(next_to_exe)
+}
+
+fn write_com_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
+    let dll = shell_dll_path()?;
+    if !dll.is_file() {
+        return Err(anyhow!("{}", ui_strings().cannot_find_shell_dll()));
+    }
+    write_com_keys_at(hive, classes, &dll.to_string_lossy())
+}
+
+fn write_com_keys_at(hive: winreg::HKEY, classes: &str, dll: &str) -> Result<()> {
+    let root = RegKey::predef(hive);
+    let (clsid, _) = root.create_subkey(format!(r"{classes}\CLSID\{SHELL_CLSID}"))?;
+    clsid.set_value("", &"FastCopy Context Menu")?;
+    let (inproc, _) = clsid.create_subkey("InProcServer32")?;
+    inproc.set_value("", &dll)?;
+    inproc.set_value("ThreadingModel", &"Apartment")?;
+    for rel in [
+        format!(r"{classes}\*\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+        format!(r"{classes}\Directory\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+        format!(r"{classes}\AllFilesystemObjects\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+    ] {
+        let (key, _) = root.create_subkey(rel)?;
+        key.set_value("", &SHELL_CLSID)?;
+    }
+    let _ = delete_if_exists(
+        &root,
+        &format!(r"{classes}\*\shellex\ContextMenuHandlers\FastCopyRust"),
+    );
+    let _ = delete_if_exists(
+        &root,
+        &format!(r"{classes}\Directory\shellex\ContextMenuHandlers\FastCopyRust"),
+    );
+    if classes.eq_ignore_ascii_case(r"Software\Classes")
+        || classes.eq_ignore_ascii_case(r"SOFTWARE\Classes")
+    {
+        write_approved_value(hive)?;
+    }
+    Ok(())
+}
+
+fn write_approved_value(hive: winreg::HKEY) -> Result<()> {
+    let path = if hive == HKEY_CURRENT_USER {
+        r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved"
+    } else {
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved"
+    };
+    let (key, _) = RegKey::predef(hive).create_subkey(path)?;
+    key.set_value(SHELL_CLSID, &"FastCopy")?;
+    Ok(())
+}
+
+fn delete_approved_value(hive: winreg::HKEY) -> Result<()> {
+    let path = if hive == HKEY_CURRENT_USER {
+        r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved"
+    } else {
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved"
+    };
+    let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(path, KEY_SET_VALUE) else {
+        return Ok(());
+    };
+    match key.delete_value(SHELL_CLSID) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn com_handler_ready(hive: winreg::HKEY, classes: &str) -> bool {
+    hive_has(
+        hive,
+        &format!(r"{classes}\*\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+    ) && hive_has(
+        hive,
+        &format!(r"{classes}\Directory\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+    ) && hive_has(
+        hive,
+        &format!(r"{classes}\AllFilesystemObjects\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+    ) && com_dll_path_matches(hive, classes)
+}
+
+fn com_dll_path_matches(hive: winreg::HKEY, classes: &str) -> bool {
+    let Ok(expected) = shell_dll_path() else {
+        return false;
+    };
+    let Ok(key) =
+        RegKey::predef(hive).open_subkey(format!(r"{classes}\CLSID\{SHELL_CLSID}\InProcServer32"))
+    else {
+        return false;
+    };
+    let registered: String = key.get_value("").unwrap_or_default();
+    registered.eq_ignore_ascii_case(&expected.to_string_lossy())
+}
+
 fn delete_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
     let root = RegKey::predef(hive);
     for rel in [
@@ -469,8 +588,19 @@ fn delete_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
         r"Directory\Background\shell\FastCopyRust",
         r"Directory\Background\shell\FastCopyPaste",
         r"Directory\Background\shell\FastCopyClear",
+        r"*\shellex\ContextMenuHandlers\FastCopyShell",
+        r"Directory\shellex\ContextMenuHandlers\FastCopyShell",
+        r"AllFilesystemObjects\shellex\ContextMenuHandlers\FastCopyShell",
+        r"*\shellex\ContextMenuHandlers\FastCopyRust",
+        r"Directory\shellex\ContextMenuHandlers\FastCopyRust",
     ] {
         delete_if_exists(&root, &format!(r"{classes}\{rel}"))?;
+    }
+    delete_if_exists(&root, &format!(r"{classes}\CLSID\{SHELL_CLSID}"))?;
+    if classes.eq_ignore_ascii_case(r"Software\Classes")
+        || classes.eq_ignore_ascii_case(r"SOFTWARE\Classes")
+    {
+        delete_approved_value(hive)?;
     }
     Ok(())
 }
@@ -507,9 +637,19 @@ pub fn unregister_machine() -> Result<()> {
         r"SOFTWARE\Classes\Directory\Background\shell\FastCopyRust",
         r"SOFTWARE\Classes\Directory\Background\shell\FastCopyPaste",
         r"SOFTWARE\Classes\Directory\Background\shell\FastCopyClear",
+        r"SOFTWARE\Classes\*\shellex\ContextMenuHandlers\FastCopyShell",
+        r"SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers\FastCopyShell",
+        r"SOFTWARE\Classes\AllFilesystemObjects\shellex\ContextMenuHandlers\FastCopyShell",
+        r"SOFTWARE\Classes\*\shellex\ContextMenuHandlers\FastCopyRust",
+        r"SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers\FastCopyRust",
     ] {
         delete_if_exists(&root, path)?;
     }
+    delete_if_exists(
+        &root,
+        &format!(r"SOFTWARE\Classes\CLSID\{SHELL_CLSID}"),
+    )?;
+    delete_approved_value(HKEY_LOCAL_MACHINE)?;
     delete_command_store(
         &root,
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell",
@@ -1002,6 +1142,7 @@ fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
         )
         || !verb_is_document(hive, &format!(r"{classes}\Directory\shell\FastCopyRust"))
         || !verb_is_document(hive, &format!(r"{classes}\*\shell\FastCopyRust"))
+        || !com_handler_ready(hive, classes)
 }
 
 fn verb_icon_ends_with(hive: winreg::HKEY, path: &str, suffix: &str) -> bool {
@@ -1252,6 +1393,23 @@ mod tests {
             .unwrap();
         old_cut.set_value("MUIVerb", &"old-cut").unwrap();
         write_cascade_keys(HKEY_CURRENT_USER, TEST_CLASSES).unwrap();
+        let dll = shell_dll_path().expect("shell dll path");
+        assert!(dll.is_file(), "missing {}", dll.display());
+        write_com_keys_at(HKEY_CURRENT_USER, TEST_CLASSES, &dll.to_string_lossy()).unwrap();
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{TEST_CLASSES}\*\shellex\ContextMenuHandlers\{SHELL_HANDLER}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{TEST_CLASSES}\CLSID\{SHELL_CLSID}\InProcServer32")
+        ));
+        let model_thread: String = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(format!(r"{TEST_CLASSES}\CLSID\{SHELL_CLSID}\InProcServer32"))
+            .unwrap()
+            .get_value("ThreadingModel")
+            .unwrap();
+        assert_eq!(model_thread, "Apartment");
         assert!(hive_has(HKEY_CURRENT_USER, &file_key));
         assert!(hive_has(
             HKEY_CURRENT_USER,
@@ -1355,7 +1513,33 @@ mod tests {
         delete_cascade_keys(HKEY_CURRENT_USER, TEST_CLASSES).unwrap();
         assert!(!hive_has(HKEY_CURRENT_USER, &file_key));
         assert!(!hive_has(HKEY_CURRENT_USER, &dir_key));
+        assert!(!hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{TEST_CLASSES}\CLSID\{SHELL_CLSID}")
+        ));
         let _ = delete_if_exists(&RegKey::predef(HKEY_CURRENT_USER), TEST_ROOT);
+    }
+
+    #[test]
+    fn shell_extension_com_server_loads() {
+        let dll = shell_dll_path().expect("shell dll path");
+        assert!(dll.is_file(), "missing {}", dll.display());
+        write_com_keys(HKEY_CURRENT_USER, r"Software\Classes").unwrap();
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            );
+            let clsid = windows::core::GUID::from_u128(0xB3E8D47A_6C1F_4A92_9E05_8F4C2B17A6D0);
+            let menu: windows::Win32::UI::Shell::IContextMenu =
+                windows::Win32::System::Com::CoCreateInstance(
+                    &clsid,
+                    None,
+                    windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+                )
+                .expect("CoCreate FastCopy shell extension");
+            drop(menu);
+        }
     }
 
     #[test]

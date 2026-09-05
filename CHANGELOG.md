@@ -5,15 +5,19 @@ Each version section is English, then Chinese.
 
 ## unreleased
 
+- Explorer FastCopy submenu still appears when more than 100 items are selected (COM context menu handler). Existing menus are repaired on the next launch. Keep `fastcopy_shell.dll` next to the EXE.
+- After `cargo build --release`, copy `fastcopy.exe` and sibling `*.dll` to `release/`.
 - Symbolic/hard-link paste no longer shows a finish toast. On failure, a message box lists the error (Win32 text; privilege 1314 mentions Developer Mode).
 - Paste as symbolic link: if creation fails with a missing privilege (or access denied), prompt UAC once and retry elevated. Document Developer Mode vs UAC, and that copy/move Preserve still has no UAC helper.
 - Remove the Settings toggle for the symbolic/hard-link finish toast.
 - Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
 
+- 选中超过 100 项时「快速复制」子菜单仍会出现（COM 右键扩展）。已注册菜单会在下次启动时自动补上。请把 `fastcopy_shell.dll` 和 EXE 放在同一目录。
 - 符号/硬链接粘贴成功后不再弹右下角通知；失败时弹出窗口说明原因（含 Win32 说明；1314 会提示需要开发人员模式）。
 - 粘贴为符号链接时，若因权限不足（或拒绝访问）失败，弹出一次 UAC，同意后以管理员重试。README 补充开发人员模式与 UAC 的区别，以及复制/移动「保留为链接」不会提权。
 - 去掉设置里的「符号/硬链接完成提示」。
 - 「参数设置」右键图标改为灰色齿轮。下次启动会覆盖已安装的图标。
+- `cargo build --release` 完成后把 `fastcopy.exe` 和同目录 `*.dll` 复制到 `release/`。
 
 ## v1.0.3 (2026-08-28)
 

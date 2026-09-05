@@ -608,6 +608,7 @@ name = "fastcopy"
 version = "1.0.3"
 dependencies = [
  "anyhow",
+ "cc",
  "crossbeam-channel",
  "eframe",
  "fs2",

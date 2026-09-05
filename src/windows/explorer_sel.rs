@@ -15,7 +15,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetForegroundWindow, GetMenuItemCount, GetMenuStringW, IsChild,
-    MF_BYPOSITION,
+    HMENU, MF_BYPOSITION,
 };
 
 pub fn selected_paths(clicked: &Path) -> Vec<PathBuf> {
@@ -122,28 +122,43 @@ pub fn background_menu_labels(folder: &Path) -> windows::core::Result<Vec<String
             SHCreateItemFromParsingName(&HSTRING::from(folder.to_string_lossy().as_ref()), None)?;
         let shell_folder: IShellFolder = item.BindToHandler(None, &BHID_SFObject)?;
         let menu: IContextMenu = shell_folder.CreateViewObject(HWND(0))?;
+        labels_from_context_menu(&menu)
+    }
+}
+
+fn labels_from_context_menu(menu: &IContextMenu) -> windows::core::Result<Vec<String>> {
+    unsafe {
         let hmenu = CreatePopupMenu()?;
         let result = menu.QueryContextMenu(hmenu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE);
-        let mut labels = Vec::new();
-        if result.is_ok() {
-            let count = GetMenuItemCount(hmenu);
-            for index in 0..count {
-                let mut buffer = [0u16; 512];
-                let copied = GetMenuStringW(hmenu, index as u32, Some(&mut buffer), MF_BYPOSITION);
-                if copied <= 0 {
-                    continue;
-                }
-                let text = String::from_utf16_lossy(&buffer[..copied as usize]);
-                let text = text.replace('&', "").replace('\u{8}', "");
-                let text = text.split('\t').next().unwrap_or(&text).trim();
-                if !text.is_empty() {
-                    labels.push(text.to_owned());
-                }
-            }
-        }
+        let labels = if result.is_ok() {
+            labels_from_hmenu(hmenu)
+        } else {
+            Vec::new()
+        };
         let _ = DestroyMenu(hmenu);
         result?;
         Ok(labels)
+    }
+}
+
+fn labels_from_hmenu(hmenu: HMENU) -> Vec<String> {
+    unsafe {
+        let mut labels = Vec::new();
+        let count = GetMenuItemCount(hmenu);
+        for index in 0..count {
+            let mut buffer = [0u16; 512];
+            let copied = GetMenuStringW(hmenu, index as u32, Some(&mut buffer), MF_BYPOSITION);
+            if copied <= 0 {
+                continue;
+            }
+            let text = String::from_utf16_lossy(&buffer[..copied as usize]);
+            let text = text.replace('&', "").replace('\u{8}', "");
+            let text = text.split('\t').next().unwrap_or(&text).trim();
+            if !text.is_empty() {
+                labels.push(text.to_owned());
+            }
+        }
+        labels
     }
 }
 

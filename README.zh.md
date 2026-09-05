@@ -15,7 +15,7 @@
 
 ## 安装
 
-1. 把 `fastcopy.exe` 放到一个固定目录（不要放在“下载”或解压后会删掉的临时文件夹）。右键菜单会记下这个 EXE 的完整路径。
+1. 把 `fastcopy.exe` 和 `fastcopy_shell.dll` 放到一个固定目录（不要放在“下载”或解压后会删掉的临时文件夹）。右键菜单会记下这个 EXE 和 DLL 的完整路径。
 2. 启动 `fastcopy.exe`，窗口会打开参数设置。
 3. 单击「注册」（当前用户，无需管理员）。
 
@@ -23,7 +23,7 @@
 
 ## 选中文件 / 文件夹
 
-对一个或多个文件、文件夹（可混选）点右键，命令在「**快速复制**」子菜单里。程序会读取资源管理器当前选中项，因此可以超过约 100 个顶层选中项。
+对一个或多个文件、文件夹（可混选）点右键，命令在「**快速复制**」子菜单里。选中超过 100 项时子菜单仍然出现（资源管理器会隐藏普通注册表动词）。程序会读取资源管理器当前选中项，因此命令覆盖全部选中项。
 
 - **快速剪切** — 把选中项放进本程序自己的剪贴板（不覆盖 Windows 文本剪贴板）。之后在文件夹空白处粘贴即为移动。
 - **快速复制** — 同样放入本程序剪贴板，之后粘贴即为复制。
@@ -123,7 +123,7 @@ cargo build --release
 node pack.js
 ```
 
-可执行文件位于 `target/release/fastcopy.exe`。`node pack.js` 会编译 Release 并生成 `release/fastcopy_1.0.3.7z`（版本号来自 `Cargo.toml`）。Release 构建使用 OpenGL（glow）、LTO 和符号剥离以控制体积。
+可执行文件位于 `target/release/fastcopy.exe`，Release 编译后会再连同目录下 `*.dll` 复制到 `release/`。`node pack.js` 会编译 Release 并生成 `release/fastcopy_1.0.3.7z`（版本号来自 `Cargo.toml`）。Release 构建使用 OpenGL（glow）、LTO 和符号剥离以控制体积。
 
 ## 性能说明
 

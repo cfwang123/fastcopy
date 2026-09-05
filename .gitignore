@@ -4,6 +4,10 @@
 /release
 AGENTS.md
 
+# Leftover copies at crate root (now go to release/)
+/*.exe
+/*.dll
+
 # Archives / debug symbols
 *.7z
 *.zip
