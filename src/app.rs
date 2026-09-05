@@ -1380,14 +1380,18 @@ impl RenameDialog {
                 ui.separator();
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_max_height(ui.available_height());
                     ui.colored_label(TEXT_SECONDARY, t.rename_pick_hint);
-                    ui.label(self.folder.display().to_string());
+                    ui.add(egui::Label::new(self.folder.display().to_string()).truncate());
                     ui.horizontal(|ui| {
+                        ui.set_height(24.0);
                         ui.colored_label(TEXT_SECONDARY, t.rename_filter);
-                        ui.add(
+                        ui.add_sized(
+                            [220.0, 24.0],
                             egui::TextEdit::singleline(&mut self.filter)
-                                .desired_width(220.0)
-                                .background_color(SURFACE),
+                                .clip_text(true)
+                                .background_color(SURFACE)
+                                .margin(egui::vec2(6.0, 4.0)),
                         );
                         if ui.button(t.rename_select_all).clicked() {
                             self.set_filtered_selected(true);
@@ -1403,8 +1407,10 @@ impl RenameDialog {
                         ui.colored_label(TEXT_SECONDARY, t.rename_empty_folder);
                     } else {
                         let filter = self.filter.to_lowercase();
+                        let list_h = ui.available_height().max(1.0);
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
+                            .max_height(list_h)
                             .show(ui, |ui| {
                                 for entry in &mut self.entries {
                                     if !filter.is_empty()
@@ -1435,15 +1441,26 @@ fn expression_edit(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
 }
 
 fn names_editor(ui: &mut egui::Ui, height: f32, text: &mut String, id: egui::Id) -> bool {
-    ui.add_sized(
-        [ui.available_width(), height],
-        egui::TextEdit::multiline(text)
-            .id(id)
-            .font(egui::TextStyle::Monospace)
-            .background_color(SURFACE)
-            .margin(egui::vec2(6.0, 4.0)),
-    )
-    .changed()
+    let width = ui.available_width();
+    let height = height.max(1.0);
+    let mut changed = false;
+    ui.allocate_ui(egui::vec2(width, height), |ui| {
+        ui.set_min_size(egui::vec2(width, height));
+        ui.set_max_size(egui::vec2(width, height));
+        changed = ui
+            .add_sized(
+                [width, height],
+                egui::TextEdit::multiline(text)
+                    .id(id)
+                    .desired_rows(1)
+                    .desired_width(width)
+                    .font(egui::TextStyle::Monospace)
+                    .background_color(SURFACE)
+                    .margin(egui::vec2(6.0, 4.0)),
+            )
+            .changed();
+    });
+    changed
 }
 
 pub(crate) fn run_rename_dialog(folder: PathBuf) -> anyhow::Result<()> {
