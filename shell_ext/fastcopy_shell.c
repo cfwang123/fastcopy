@@ -28,6 +28,7 @@ struct Handler {
 	IShellExtInit init;
 	LONG ref;
 	UINT nfiles;
+	UINT is_folder;
 	WCHAR first[32768];
 	HBITMAP bmp[BMP_COUNT];
 };
@@ -82,9 +83,15 @@ static HRESULT STDMETHODCALLTYPE Menu_QueryContextMenu(IContextMenu *this, HMENU
 	insert_cmd(sub, 4, idCmdFirst + CMD_HARDLINK, L"shell\\5hardlink", L"Copy as hard link", h->bmp[BMP_COPY]);
 	insert_cmd(sub, 5, idCmdFirst + CMD_SIZE, L"shell\\7size", L"Folder size", h->bmp[BMP_SIZE]);
 	insert_cmd(sub, 6, idCmdFirst + CMD_COPYPATH, L"shell\\8copypath", L"Copy paths", h->bmp[BMP_PATH]);
-	insert_cmd(sub, 7, idCmdFirst + CMD_RENAME, L"shell\\9rename", L"Batch rename", h->bmp[BMP_RENAME]);
-	InsertMenuW(sub, 8, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
-	insert_cmd(sub, 9, idCmdFirst + CMD_SETTINGS, L"shell\\zsettings", L"Settings", h->bmp[BMP_SETTINGS]);
+	if(h->is_folder){
+		insert_cmd(sub, 7, idCmdFirst + CMD_RENAME, L"shell\\9rename", L"Batch rename", h->bmp[BMP_RENAME]);
+		InsertMenuW(sub, 8, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+		insert_cmd(sub, 9, idCmdFirst + CMD_SETTINGS, L"shell\\zsettings", L"Settings", h->bmp[BMP_SETTINGS]);
+	}
+	else {
+		InsertMenuW(sub, 7, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+		insert_cmd(sub, 8, idCmdFirst + CMD_SETTINGS, L"shell\\zsettings", L"Settings", h->bmp[BMP_SETTINGS]);
+	}
 	read_label(L"", label, 256, L"FastCopy");
 	{
 		MENUITEMINFOW mii;
@@ -139,47 +146,61 @@ static HRESULT STDMETHODCALLTYPE Init_Initialize(IShellExtInit *this, LPCITEMIDL
 	FORMATETC fe;
 	STGMEDIUM stg;
 	UINT n_drop = 0, n_ida = 0;
-	WCHAR drop_first[32768], ida_first[32768];
-	(void)pidlFolder;
+	WCHAR drop_first[32768], ida_first[32768], folder[32768];
+	DWORD attr;
 	(void)hkeyProgID;
 	h->nfiles = 0;
+	h->is_folder = 0;
 	h->first[0] = 0;
 	drop_first[0] = 0;
 	ida_first[0] = 0;
-	if(!pdtobj) return S_OK;
-	memset(&fe, 0, sizeof(fe));
-	fe.dwAspect = DVASPECT_CONTENT;
-	fe.lindex = -1;
-	fe.tymed = TYMED_HGLOBAL;
-	fe.cfFormat = CF_HDROP;
-	if(SUCCEEDED(IDataObject_GetData(pdtobj, &fe, &stg))){
-		n_drop = DragQueryFileW((HDROP)stg.hGlobal, 0xFFFFFFFF, NULL, 0);
-		if(n_drop > 0) DragQueryFileW((HDROP)stg.hGlobal, 0, drop_first, 32768);
-		ReleaseStgMedium(&stg);
-	}
-	fe.cfFormat = (CLIPFORMAT)RegisterClipboardFormatW(CFSTR_SHELLIDLIST);
-	if(SUCCEEDED(IDataObject_GetData(pdtobj, &fe, &stg))){
-		CIDA *cida = (CIDA *)GlobalLock(stg.hGlobal);
-		if(cida){
-			n_ida = cida->cidl;
-			if(n_ida > 0){
-				LPITEMIDLIST abs = ILCombine((LPCITEMIDLIST)((BYTE *)cida + cida->aoffset[0]), (LPCITEMIDLIST)((BYTE *)cida + cida->aoffset[1]));
-				if(abs){
-					SHGetPathFromIDListW(abs, ida_first);
-					ILFree(abs);
-				}
-			}
-			GlobalUnlock(stg.hGlobal);
+	attr = 0;
+	if(pdtobj){
+		memset(&fe, 0, sizeof(fe));
+		fe.dwAspect = DVASPECT_CONTENT;
+		fe.lindex = -1;
+		fe.tymed = TYMED_HGLOBAL;
+		fe.cfFormat = CF_HDROP;
+		if(SUCCEEDED(IDataObject_GetData(pdtobj, &fe, &stg))){
+			n_drop = DragQueryFileW((HDROP)stg.hGlobal, 0xFFFFFFFF, NULL, 0);
+			if(n_drop > 0) DragQueryFileW((HDROP)stg.hGlobal, 0, drop_first, 32768);
+			ReleaseStgMedium(&stg);
 		}
-		ReleaseStgMedium(&stg);
+		fe.cfFormat = (CLIPFORMAT)RegisterClipboardFormatW(CFSTR_SHELLIDLIST);
+		if(SUCCEEDED(IDataObject_GetData(pdtobj, &fe, &stg))){
+			CIDA *cida = (CIDA *)GlobalLock(stg.hGlobal);
+			if(cida){
+				n_ida = cida->cidl;
+				if(n_ida > 0){
+					LPITEMIDLIST abs = ILCombine((LPCITEMIDLIST)((BYTE *)cida + cida->aoffset[0]), (LPCITEMIDLIST)((BYTE *)cida + cida->aoffset[1]));
+					if(abs){
+						SHGetPathFromIDListW(abs, ida_first);
+						ILFree(abs);
+					}
+				}
+				GlobalUnlock(stg.hGlobal);
+			}
+			ReleaseStgMedium(&stg);
+		}
+		if(n_ida > n_drop){
+			h->nfiles = n_ida;
+			lstrcpynW(h->first, ida_first, 32768);
+		}
+		else {
+			h->nfiles = n_drop;
+			lstrcpynW(h->first, drop_first, 32768);
+		}
 	}
-	if(n_ida > n_drop){
-		h->nfiles = n_ida;
-		lstrcpynW(h->first, ida_first, 32768);
+	if(pidlFolder){
+		folder[0] = 0;
+		if(SHGetPathFromIDListW(pidlFolder, folder) && folder[0]){
+			h->is_folder = 1;
+			if(!h->first[0]) lstrcpynW(h->first, folder, 32768);
+		}
 	}
-	else {
-		h->nfiles = n_drop;
-		lstrcpynW(h->first, drop_first, 32768);
+	if(h->first[0]){
+		attr = GetFileAttributesW(h->first);
+		if(attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) h->is_folder = 1;
 	}
 	return S_OK;
 }

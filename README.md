@@ -34,15 +34,16 @@ Right-click one or more files, folders, or a mix. Commands are under the **FastC
 - **View source path** — Same single-link condition. Shows the path (the real target for those links) with Copy path and Open path.
 - **Folder size** — Scan the selection and show file count, folder count, and bytes.
 - **Copy paths** — Write one absolute path per line to the Windows text clipboard. Hold Shift for paths relative to the common parent.
-- **Batch rename** — One window for the whole selection. Old and new name lists are editable (delete or reorder old-name lines to drop/reorder files). Opening fills Everything-style patterns: common prefix/suffix stay literal, the varying middle is `%1` (`*` in the old pattern is also a capture). In the new pattern, `%1` is that capture and `#` / `###` are numbers. Toggling Ignore extension rebuilds the pattern from the stems.
+- **Batch rename** — Right-click a folder, or empty space inside a folder. The window lists that folder’s files and subfolders; select items, then Next. Old and new name lists are editable (delete or reorder old-name lines to drop/reorder files). Opening fills Everything-style patterns: common prefix/suffix stay literal, the varying middle is `%1` (`*` in the old pattern is also a capture). In the new pattern, `%1` is that capture and `#` / `###` are numbers. Toggling Ignore extension rebuilds the pattern from the stems.
 - **Settings** — Open FastCopy Settings (separator above this item).
 
 ## Folder background
 
-Right-click empty space inside a folder. These items appear only after a Quick Cut, Quick Copy, or link-copy, and are hidden again after a normal paste or cancel.
+Right-click empty space inside a folder. **Quick Paste** and **Cancel Cut/Copy** appear only after a Quick Cut, Quick Copy, or link-copy, and are hidden again after a normal paste or cancel. **Batch rename** is always there.
 
 - **Quick Paste** — Paste into this folder from FastCopy’s clipboard. A copy or cut opens the progress window. After a link-copy the label is **Paste as symbolic link** / **Paste as hard link**, or **Paste (N files) as …** when more than one item was copied; that paste runs in the background with no progress window. Hold Shift while clicking to keep the clipboard and paste again. A cut still clears it, because the source is gone.
 - **Cancel Cut/Copy** — Clear the pending list without pasting.
+- **Batch rename** — Same window as when you right-click the folder: pick files in this folder, then rename.
 
 ## Symbolic and hard links
 

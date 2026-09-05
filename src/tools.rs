@@ -630,6 +630,19 @@ fn same_item(left: &Path, right: &Path) -> bool {
         .eq_ignore_ascii_case(&right_abs.to_string_lossy())
 }
 
+pub fn folder_rename_entries(folder: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = match fs::read_dir(folder) {
+        Ok(entries) => entries.flatten().map(|entry| entry.path()).collect(),
+        Err(_) => return Vec::new(),
+    };
+    paths.sort_by(|left, right| {
+        let left_name = left.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        let right_name = right.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        left_name.cmp(&right_name)
+    });
+    paths
+}
+
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -867,5 +880,18 @@ mod tests {
         let plans = plan_renames(&[a, b], &options);
         assert_eq!(plans[0].to, "b.txt");
         assert_eq!(plans[0].kind, RenameKind::Conflict);
+    }
+
+    #[test]
+    fn folder_rename_entries_lists_children() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("b.txt"), b"1").unwrap();
+        fs::write(root.path().join("a.txt"), b"2").unwrap();
+        fs::create_dir(root.path().join("sub")).unwrap();
+        let names: Vec<String> = folder_rename_entries(root.path())
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.txt", "sub"]);
     }
 }

@@ -42,6 +42,7 @@ const CASCADE_SIZE: &str = r"shell\7size";
 const CASCADE_COPY_PATHS: &str = r"shell\8copypath";
 const CASCADE_RENAME: &str = r"shell\9rename";
 const CASCADE_SETTINGS: &str = r"shell\zsettings";
+const BACKGROUND_RENAME_VERB: &str = r"Directory\Background\shell\FastCopyRename";
 const CASCADE_SEPARATOR_BEFORE: u32 = 0x20;
 const LINK_APPLIES_TO: &str = "System.FileExtension:.lnk OR System.FileAttributes:1024";
 const SHELL_CLSID: &str = "{B3E8D47A-6C1F-4A92-9E05-8F4C2B17A6D0}";
@@ -394,17 +395,23 @@ pub fn try_update_menu_labels() {
             .is_ok();
             updated |= set_verb_label(
                 hive,
-                &format!(r"{parent}\{CASCADE_RENAME}"),
-                t.menu_rename,
-            )
-            .is_ok();
-            updated |= set_verb_label(
-                hive,
                 &format!(r"{parent}\{CASCADE_SETTINGS}"),
                 t.settings_title,
             )
             .is_ok();
         }
+        updated |= set_verb_label(
+            hive,
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_RENAME}"),
+            t.menu_rename,
+        )
+        .is_ok();
+        updated |= set_background_verb_label(
+            hive,
+            &format!(r"{classes}\{BACKGROUND_RENAME_VERB}"),
+            t.menu_rename,
+        )
+        .is_ok();
     }
     let paste_label = paste_menu_label(t);
     updated |= set_background_verb_label(HKEY_CURRENT_USER, HKCU_PASTE_VERB, &paste_label).is_ok();
@@ -459,13 +466,16 @@ fn write_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
         &format!(r"{classes}\*\shell\FastCopyRust"),
         &executable,
         &icons,
+        false,
     )?;
     create_cascade(
         &root,
         &format!(r"{classes}\Directory\shell\FastCopyRust"),
         &executable,
         &icons,
+        true,
     )?;
+    write_background_rename(&root, classes, &executable, &icons)?;
     Ok(())
 }
 
@@ -586,6 +596,7 @@ fn delete_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
         r"Directory\Background\shell\FastCopyRust",
         r"Directory\Background\shell\FastCopyPaste",
         r"Directory\Background\shell\FastCopyClear",
+        BACKGROUND_RENAME_VERB,
     ] {
         delete_if_exists(&root, &format!(r"{classes}\{rel}"))?;
     }
@@ -640,6 +651,7 @@ pub fn unregister_machine() -> Result<()> {
         r"SOFTWARE\Classes\Directory\Background\shell\FastCopyRust",
         r"SOFTWARE\Classes\Directory\Background\shell\FastCopyPaste",
         r"SOFTWARE\Classes\Directory\Background\shell\FastCopyClear",
+        r"SOFTWARE\Classes\Directory\Background\shell\FastCopyRename",
     ] {
         delete_if_exists(&root, path)?;
     }
@@ -922,6 +934,7 @@ fn create_cascade(
     parent: &str,
     executable: &str,
     icons: &Path,
+    with_rename: bool,
 ) -> Result<()> {
     let t = ui_strings();
     let (key, _) = root.create_subkey(parent)?;
@@ -994,13 +1007,17 @@ fn create_cascade(
         &format!("\"{executable}\" --shell-copy-path \"%1\""),
         &icons.join("path.ico"),
     )?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_RENAME}"),
-        t.menu_rename,
-        &format!("\"{executable}\" --shell-rename \"%1\""),
-        &icons.join("rename.ico"),
-    )?;
+    if with_rename {
+        upsert_user_verb(
+            root,
+            &format!(r"{parent}\{CASCADE_RENAME}"),
+            t.menu_rename,
+            &format!("\"{executable}\" --shell-rename \"%1\""),
+            &icons.join("rename.ico"),
+        )?;
+    } else {
+        delete_if_exists(root, &format!(r"{parent}\{CASCADE_RENAME}"))?;
+    }
     let _ = delete_if_exists(root, &format!(r"{parent}\shell\6settings"));
     upsert_user_verb(
         root,
@@ -1015,6 +1032,22 @@ fn create_cascade(
     )?;
     settings_key.set_value("CommandFlags", &CASCADE_SEPARATOR_BEFORE)?;
     Ok(())
+}
+
+fn write_background_rename(
+    root: &RegKey,
+    classes: &str,
+    executable: &str,
+    icons: &Path,
+) -> Result<()> {
+    let t = ui_strings();
+    upsert_background_verb(
+        root,
+        &format!(r"{classes}\{BACKGROUND_RENAME_VERB}"),
+        t.menu_rename,
+        &format!("\"{executable}\" --shell-rename \"%V\""),
+        &icons.join("rename.ico"),
+    )
 }
 
 fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
@@ -1084,7 +1117,7 @@ fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
             hive,
             &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_COPY_PATHS}"),
         )
-        || !hive_has(
+        || hive_has(
             hive,
             &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_RENAME}"),
         )
@@ -1092,6 +1125,7 @@ fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
             hive,
             &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_RENAME}"),
         )
+        || !hive_has(hive, &format!(r"{classes}\{BACKGROUND_RENAME_VERB}"))
         || hive_has(
             hive,
             &format!(r"{classes}\*\shell\FastCopyRust\shell\6settings"),
@@ -1108,7 +1142,7 @@ fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
         )
         || !verb_icon_ends_with(
             hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_RENAME}"),
+            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_RENAME}"),
             "rename.ico",
         )
         || !verb_icon_ends_with(
@@ -1457,9 +1491,17 @@ mod tests {
             HKEY_CURRENT_USER,
             &format!(r"{file_key}\{CASCADE_COPY_PATHS}")
         ));
-        assert!(hive_has(
+        assert!(!hive_has(
             HKEY_CURRENT_USER,
             &format!(r"{file_key}\{CASCADE_RENAME}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{dir_key}\{CASCADE_RENAME}")
+        ));
+        assert!(hive_has(
+            HKEY_CURRENT_USER,
+            &format!(r"{TEST_CLASSES}\{BACKGROUND_RENAME_VERB}")
         ));
         assert!(hive_has(
             HKEY_CURRENT_USER,
