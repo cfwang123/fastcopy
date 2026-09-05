@@ -341,7 +341,7 @@ static HRESULT launch(struct Handler *h, UINT id){
 	}
 	memset(&si, 0, sizeof(si));
 	si.cb = sizeof(si);
-	if(!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) return HRESULT_FROM_WIN32(GetLastError());
+	if(!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return HRESULT_FROM_WIN32(GetLastError());
 	CloseHandle(pi.hThread);
 	CloseHandle(pi.hProcess);
 	return S_OK;
