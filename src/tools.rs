@@ -630,7 +630,6 @@ fn same_item(left: &Path, right: &Path) -> bool {
         .eq_ignore_ascii_case(&right_abs.to_string_lossy())
 }
 
-#[cfg(test)]
 pub fn folder_rename_entries(folder: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = match fs::read_dir(folder) {
         Ok(entries) => entries.flatten().map(|entry| entry.path()).collect(),

@@ -81,7 +81,13 @@ pub struct Strings {
     pub rename_number_hint: &'static str,
     pub rename_new_list: &'static str,
     pub rename_pick_hint: &'static str,
+    pub rename_filter: &'static str,
+    pub rename_select_all: &'static str,
+    pub rename_select_none: &'static str,
+    pub rename_invert: &'static str,
+    pub rename_next: &'static str,
     pub rename_back: &'static str,
+    pub rename_empty_folder: &'static str,
     pub ok: &'static str,
     pub cancel: &'static str,
     pub current_item: &'static str,
@@ -175,8 +181,14 @@ pub const ZH: Strings = Strings {
     rename_ignore_ext: "忽略扩展名",
     rename_number_hint: "表达式：旧名中的 %1 或 * 为捕获，新名 %1 为第 1 个捕获，# 编号",
     rename_new_list: "新文件名",
-    rename_pick_hint: "选择要改名的文件",
+    rename_pick_hint: "选择要改名的文件（当前文件夹内）",
+    rename_filter: "筛选",
+    rename_select_all: "全选",
+    rename_select_none: "全不选",
+    rename_invert: "反选",
+    rename_next: "下一步",
     rename_back: "重选文件",
+    rename_empty_folder: "此文件夹没有可改名的项",
     ok: "确定",
     cancel: "取消",
     current_item: "当前项",
@@ -270,8 +282,14 @@ pub const EN: Strings = Strings {
     rename_ignore_ext: "Ignore extension",
     rename_number_hint: "Pattern: %1 or * in the old name is a capture; %1 in the new name is the first capture; # number",
     rename_new_list: "New names",
-    rename_pick_hint: "Select files to rename",
+    rename_pick_hint: "Select files to rename in this folder",
+    rename_filter: "Filter",
+    rename_select_all: "Select all",
+    rename_select_none: "Select none",
+    rename_invert: "Invert",
+    rename_next: "Next",
     rename_back: "Reselect",
+    rename_empty_folder: "This folder has nothing to rename",
     ok: "OK",
     cancel: "Cancel",
     current_item: "Current item",
@@ -499,6 +517,14 @@ impl Strings {
             "Nothing to rename"
         } else {
             "没有需要改名的项"
+        }
+    }
+
+    pub fn rename_selected_count(&self, selected: usize, total: usize) -> String {
+        if self.en() {
+            format!("Selected {selected} of {total}")
+        } else {
+            format!("已选 {selected} / {total} 项")
         }
     }
 

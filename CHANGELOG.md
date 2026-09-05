@@ -5,7 +5,7 @@ Each version section is English, then Chinese.
 
 ## unreleased
 
-- Batch rename from a folder first opens the system file picker in that folder; the rename window appears after files are chosen.
+- Batch rename from a folder lists that folder’s files first; you must select files before the rename page. The folder you right-clicked is not treated as the item to rename.
 - Debug `fastcopy.exe` no longer opens a console window when launched from Explorer (same as Release).
 - Batch rename is no longer on a multi-file selection. Right-click a folder or folder background.
 - Explorer FastCopy submenu still appears when more than 100 items are selected (COM context menu handler). The handler no longer skips when Explorer’s IDataObject reports 100 or fewer items (a large selection often arrives as one file). Existing menus are repaired on the next launch. After updating `fastcopy_shell.dll`, restart Explorer so it reloads the DLL.
@@ -15,7 +15,7 @@ Each version section is English, then Chinese.
 - Remove the Settings toggle for the symbolic/hard-link finish toast.
 - Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
 
-- 对文件夹做批量改名时，先弹出系统选文件对话框，选完文件再进入改名窗口。
+- 对文件夹做批量改名时，先列出该文件夹里的文件，勾选后才能进入改名页。右键的那个文件夹本身不会被当成改名对象。
 - Debug 的 `fastcopy.exe` 从资源管理器启动时不再弹出控制台黑窗口（与 Release 一样）。
 - 批量改名不再出现在多选文件的右键里。改为右键文件夹或文件夹空白处。
 - 选中超过 100 项时「快速复制」子菜单仍会出现（COM 右键扩展）。资源管理器多选时 IDataObject 常常只带一项，扩展不再因此跳过。已注册菜单会在下次启动时自动补上。更新 `fastcopy_shell.dll` 后请重启资源管理器，否则仍加载旧 DLL。

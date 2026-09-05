@@ -8,7 +8,7 @@ use crate::windows::shell_menu::{self, InstanceGuard, PendingCommand};
 use eframe::egui;
 use std::collections::VecDeque;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -1034,8 +1034,23 @@ pub(crate) fn run_size_dialog(paths: Vec<PathBuf>) -> anyhow::Result<()> {
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
+struct RenamePickEntry {
+    path: PathBuf,
+    name: String,
+    selected: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenamePhase {
+    Pick,
+    Rename,
+}
+
 struct RenameDialog {
     folder: PathBuf,
+    phase: RenamePhase,
+    entries: Vec<RenamePickEntry>,
+    filter: String,
     source_items: Vec<tools::RenameItem>,
     items: Vec<tools::RenameItem>,
     old_text: String,
@@ -1048,59 +1063,83 @@ struct RenameDialog {
     close: bool,
 }
 
-fn items_from_paths(paths: Vec<PathBuf>) -> Vec<tools::RenameItem> {
-    paths
-        .into_iter()
-        .map(|path| {
-            let from = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            tools::RenameItem { path, from }
-        })
-        .collect()
-}
-
-fn pick_rename_files(folder: &Path, t: &crate::i18n::Strings) -> Option<Vec<PathBuf>> {
-    rfd::FileDialog::new()
-        .set_title(t.rename_pick_hint)
-        .set_directory(folder)
-        .pick_files()
-        .filter(|paths| !paths.is_empty())
-}
-
 impl RenameDialog {
-    fn new(context: &eframe::CreationContext<'_>, folder: PathBuf, paths: Vec<PathBuf>) -> Self {
+    fn new(context: &eframe::CreationContext<'_>, folder: PathBuf) -> Self {
         install_chinese_font(&context.egui_ctx);
         configure_style(&context.egui_ctx);
-        let items = items_from_paths(paths);
         let mut dialog = Self {
             folder,
-            old_text: items
-                .iter()
-                .map(|item| item.from.clone())
-                .collect::<Vec<_>>()
-                .join("\n"),
+            phase: RenamePhase::Pick,
+            entries: Vec::new(),
+            filter: String::new(),
+            old_text: String::new(),
             new_text: String::new(),
             new_edit_epoch: 0,
-            source_items: items.clone(),
-            items,
+            source_items: Vec::new(),
+            items: Vec::new(),
             options: tools::RenameOptions::default(),
             plans: Vec::new(),
             status: String::new(),
             status_ok: false,
             close: false,
         };
-        dialog.apply_auto_pattern();
-        dialog.rebuild_from_pattern();
+        dialog.reload_entries(&[]);
         dialog
     }
 
-    fn reselect_files(&mut self, t: &crate::i18n::Strings) {
-        let Some(paths) = pick_rename_files(&self.folder, t) else {
+    fn reload_entries(&mut self, keep: &[PathBuf]) {
+        self.entries = tools::folder_rename_entries(&self.folder)
+            .into_iter()
+            .filter(|path| path != &self.folder)
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let selected = keep
+                    .iter()
+                    .any(|kept| crate::windows::explorer_sel::same_path(kept, &path));
+                RenamePickEntry {
+                    path,
+                    name,
+                    selected,
+                }
+            })
+            .collect();
+    }
+
+    fn set_filtered_selected(&mut self, selected: bool) {
+        let filter = self.filter.to_lowercase();
+        for entry in &mut self.entries {
+            if filter.is_empty() || entry.name.to_lowercase().contains(&filter) {
+                entry.selected = selected;
+            }
+        }
+    }
+
+    fn invert_filtered(&mut self) {
+        let filter = self.filter.to_lowercase();
+        for entry in &mut self.entries {
+            if filter.is_empty() || entry.name.to_lowercase().contains(&filter) {
+                entry.selected = !entry.selected;
+            }
+        }
+    }
+
+    fn enter_rename(&mut self) {
+        let items: Vec<tools::RenameItem> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.selected)
+            .filter(|entry| !crate::windows::explorer_sel::same_path(&entry.path, &self.folder))
+            .map(|entry| tools::RenameItem {
+                path: entry.path.clone(),
+                from: entry.name.clone(),
+            })
+            .collect();
+        if items.is_empty() {
             return;
-        };
-        let items = items_from_paths(paths);
+        }
         self.old_text = items
             .iter()
             .map(|item| item.from.clone())
@@ -1110,8 +1149,15 @@ impl RenameDialog {
         self.items = items;
         self.status.clear();
         self.status_ok = false;
+        self.phase = RenamePhase::Rename;
         self.apply_auto_pattern();
         self.rebuild_from_pattern();
+    }
+
+    fn back_to_pick(&mut self) {
+        let keep: Vec<PathBuf> = self.items.iter().map(|item| item.path.clone()).collect();
+        self.reload_entries(&keep);
+        self.phase = RenamePhase::Pick;
     }
 
     fn apply_auto_pattern(&mut self) {
@@ -1201,6 +1247,10 @@ impl eframe::App for RenameDialog {
         if self.close {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        if self.phase == RenamePhase::Pick {
+            self.pick_ui(ui, t);
+            return;
+        }
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
         let conflict_text = self
             .plans
@@ -1220,7 +1270,7 @@ impl eframe::App for RenameDialog {
                         self.close = true;
                     }
                     if ui.button(t.rename_back).clicked() {
-                        self.reselect_files(t);
+                        self.back_to_pick();
                     }
                     if ui.button(t.cancel).clicked() {
                         self.close = true;
@@ -1309,6 +1359,77 @@ impl eframe::App for RenameDialog {
     }
 }
 
+impl RenameDialog {
+    fn pick_ui(&mut self, ui: &mut egui::Ui, t: &crate::i18n::Strings) {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+        fill_background(ui, |ui| {
+            ui.set_max_size(ui.available_size());
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                ui.horizontal(|ui| {
+                    let selected = self.entries.iter().filter(|entry| entry.selected).count();
+                    if ui
+                        .add_enabled(selected > 0, primary_button(t.rename_next))
+                        .clicked()
+                    {
+                        self.enter_rename();
+                    }
+                    if ui.button(t.cancel).clicked() {
+                        self.close = true;
+                    }
+                    ui.label(t.rename_selected_count(selected, self.entries.len()));
+                });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_max_height(ui.available_height());
+                    ui.colored_label(TEXT_SECONDARY, t.rename_pick_hint);
+                    ui.add(egui::Label::new(self.folder.display().to_string()).truncate());
+                    ui.horizontal(|ui| {
+                        ui.set_height(24.0);
+                        ui.colored_label(TEXT_SECONDARY, t.rename_filter);
+                        ui.add_sized(
+                            [220.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.filter)
+                                .clip_text(true)
+                                .background_color(SURFACE)
+                                .margin(egui::vec2(6.0, 4.0)),
+                        );
+                        if ui.button(t.rename_select_all).clicked() {
+                            self.set_filtered_selected(true);
+                        }
+                        if ui.button(t.rename_select_none).clicked() {
+                            self.set_filtered_selected(false);
+                        }
+                        if ui.button(t.rename_invert).clicked() {
+                            self.invert_filtered();
+                        }
+                    });
+                    if self.entries.is_empty() {
+                        ui.colored_label(TEXT_SECONDARY, t.rename_empty_folder);
+                    } else {
+                        let filter = self.filter.to_lowercase();
+                        let list_h = ui.available_height().max(1.0);
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .max_height(list_h)
+                            .show(ui, |ui| {
+                                for entry in &mut self.entries {
+                                    if !filter.is_empty()
+                                        && !entry.name.to_lowercase().contains(&filter)
+                                    {
+                                        continue;
+                                    }
+                                    ui.checkbox(&mut entry.selected, &entry.name);
+                                }
+                            });
+                    }
+                });
+            });
+        });
+    }
+}
+
 fn expression_edit(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
     ui.colored_label(TEXT_SECONDARY, label);
     ui.add_sized(
@@ -1346,9 +1467,6 @@ fn names_editor(ui: &mut egui::Ui, height: f32, text: &mut String, id: egui::Id)
 
 pub(crate) fn run_rename_dialog(folder: PathBuf) -> anyhow::Result<()> {
     let t = crate::i18n::strings(load_settings().language);
-    let Some(paths) = pick_rename_files(&folder, t) else {
-        return Ok(());
-    };
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/app.png"))
         .map_err(|error| anyhow::anyhow!("{}", t.cannot_load_icon(&error)))?;
     let mut viewport = eframe::egui::ViewportBuilder::default()
@@ -1367,7 +1485,7 @@ pub(crate) fn run_rename_dialog(folder: PathBuf) -> anyhow::Result<()> {
     eframe::run_native(
         t.menu_rename,
         options,
-        Box::new(move |context| Ok(Box::new(RenameDialog::new(context, folder, paths)))),
+        Box::new(move |context| Ok(Box::new(RenameDialog::new(context, folder)))),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
