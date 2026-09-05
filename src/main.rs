@@ -105,23 +105,21 @@ fn run() -> Result<i32> {
             return Ok(0);
         }
         Some("--shell-copy") | Some("--shell-cut") => {
-            let path = argument_path(&arguments, t)?;
             let kind = if arguments[1] == "--shell-copy" {
                 ClipboardKind::Copy
             } else {
                 ClipboardKind::Move
             };
-            shell_menu::update_clipboard(kind, windows::explorer_sel::selected_paths(&path))?;
+            shell_menu::update_clipboard(kind, shell_selection(&arguments))?;
             return Ok(0);
         }
         Some("--shell-copy-symlink") | Some("--shell-copy-hardlink") => {
-            let path = argument_path(&arguments, t)?;
             let kind = if arguments[1] == "--shell-copy-symlink" {
                 ClipboardKind::CopySymlink
             } else {
                 ClipboardKind::CopyHardlink
             };
-            shell_menu::update_clipboard(kind, windows::explorer_sel::selected_paths(&path))?;
+            shell_menu::update_clipboard(kind, shell_selection(&arguments))?;
             return Ok(0);
         }
         Some("--shell-clear-clipboard") => {
@@ -169,8 +167,7 @@ fn run() -> Result<i32> {
             );
         }
         Some("--shell-delete") => {
-            let path = argument_path(&arguments, t)?;
-            for selected in windows::explorer_sel::selected_paths(&path) {
+            for selected in shell_selection(&arguments) {
                 shell_menu::append_pending(&PendingCommand::Delete(selected))?;
             }
         }
@@ -193,9 +190,7 @@ fn run() -> Result<i32> {
             return Ok(0);
         }
         Some("--shell-size") => {
-            let path = argument_path(&arguments, t)?;
-            let Some(claim) =
-                shell_menu::claim_selection("size", windows::explorer_sel::selected_paths(&path))?
+            let Some(claim) = shell_menu::claim_selection("size", shell_selection(&arguments))?
             else {
                 return Ok(0);
             };
@@ -205,12 +200,9 @@ fn run() -> Result<i32> {
             return Ok(0);
         }
         Some("--shell-copy-path") => {
-            let path = argument_path(&arguments, t)?;
             let relative = shell_menu::shift_key_down();
-            let Some(claim) = shell_menu::claim_selection(
-                "copypath",
-                windows::explorer_sel::selected_paths(&path),
-            )?
+            let Some(claim) =
+                shell_menu::claim_selection("copypath", shell_selection(&arguments))?
             else {
                 return Ok(0);
             };
@@ -224,9 +216,8 @@ fn run() -> Result<i32> {
             return Ok(0);
         }
         Some("--shell-rename") => {
-            let path = argument_path(&arguments, t)?;
             let Some(claim) =
-                shell_menu::claim_selection("rename", windows::explorer_sel::selected_paths(&path))?
+                shell_menu::claim_selection("rename", shell_selection(&arguments))?
             else {
                 return Ok(0);
             };
@@ -402,4 +393,11 @@ fn argument_path(arguments: &[String], t: &crate::i18n::Strings) -> Result<PathB
         .get(2)
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("{}", t.missing_cli_path()))
+}
+
+fn shell_selection(arguments: &[String]) -> Vec<PathBuf> {
+    match arguments.get(2).filter(|path| !path.is_empty()) {
+        Some(path) => windows::explorer_sel::selected_paths(std::path::Path::new(path)),
+        None => windows::explorer_sel::current_selection(),
+    }
 }

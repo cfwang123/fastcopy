@@ -13,8 +13,6 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "uuid.lib")
 
-/* Explorer hides static verbs after this many selected items (MultiSelectModel=Document). */
-enum { STATIC_VERB_MAX = 100 };
 enum { BMP_APP = 0, BMP_CUT, BMP_COPY, BMP_DELETE, BMP_SIZE, BMP_PATH, BMP_RENAME, BMP_SETTINGS, BMP_COUNT };
 enum { CMD_CUT = 0, CMD_COPY, CMD_DELETE, CMD_SYMLINK, CMD_HARDLINK, CMD_SIZE, CMD_COPYPATH, CMD_RENAME, CMD_SETTINGS, CMD_COUNT };
 
@@ -62,13 +60,10 @@ static HRESULT STDMETHODCALLTYPE Menu_QueryContextMenu(IContextMenu *this, HMENU
 	struct Handler *h = CONTAINING_RECORD(this, struct Handler, menu);
 	HMENU sub;
 	WCHAR label[256];
-	UINT need;
+	(void)idCmdLast;
 	if(uFlags & CMF_DEFAULTONLY) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-	if(!hmenu || h->nfiles == 0) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-	if(h->nfiles <= STATIC_VERB_MAX) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+	if(!hmenu) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
 	if(menu_has_cascade(hmenu)) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-	need = idCmdFirst + CMD_COUNT - 1;
-	if(idCmdLast < need) return E_FAIL;
 	handler_clear_bitmaps(h);
 	h->bmp[BMP_APP] = load_icon_bitmap(L"app.ico");
 	h->bmp[BMP_CUT] = load_icon_bitmap(L"cut.ico");
@@ -317,11 +312,10 @@ static HRESULT launch(struct Handler *h, UINT id){
 	case CMD_SETTINGS: flag = L"--settings"; break;
 	default: return E_INVALIDARG;
 	}
-	if(id == CMD_SETTINGS){
+	if(id == CMD_SETTINGS || !h->first[0]){
 		if(FAILED(StringCchPrintfW(cmd, 65536, L"\"%s\" %s", exe, flag))) return E_FAIL;
 	}
 	else {
-		if(!h->first[0]) return E_FAIL;
 		if(FAILED(StringCchPrintfW(cmd, 65536, L"\"%s\" %s \"%s\"", exe, flag, h->first))) return E_FAIL;
 	}
 	memset(&si, 0, sizeof(si));

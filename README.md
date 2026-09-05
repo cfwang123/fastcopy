@@ -23,7 +23,7 @@ After that, Explorer shows a **FastCopy** submenu on selected files and folders,
 
 ## Selected files and folders
 
-Right-click one or more files, folders, or a mix. Commands are under the **FastCopy** submenu. The submenu stays visible when more than 100 items are selected (Explorer hides ordinary registry verbs after that). The app reads the current Explorer selection so the command covers the whole selection.
+Right-click one or more files, folders, or a mix. Commands are under the **FastCopy** submenu. The submenu stays visible when more than 100 items are selected (Explorer hides ordinary registry verbs after that). The app reads the current Explorer selection so the command covers the whole selection. After replacing `fastcopy_shell.dll`, restart Explorer so the new DLL is loaded.
 
 - **Quick Cut** — Put the selection on FastCopy’s own clipboard (not the Windows text clipboard). Paste later on a folder background to move.
 - **Quick Copy** — Same clipboard, paste later to copy.

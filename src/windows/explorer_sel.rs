@@ -31,6 +31,13 @@ pub fn selected_paths(clicked: &Path) -> Vec<PathBuf> {
     }
 }
 
+pub fn current_selection() -> Vec<PathBuf> {
+    match selected_paths_from_explorer() {
+        Ok(paths) if !paths.is_empty() => unique_paths(paths),
+        _ => Vec::new(),
+    }
+}
+
 pub fn same_path(left: &Path, right: &Path) -> bool {
     path_key(left) == path_key(right)
 }

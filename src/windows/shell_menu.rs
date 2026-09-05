@@ -47,6 +47,14 @@ const LINK_APPLIES_TO: &str = "System.FileExtension:.lnk OR System.FileAttribute
 const SHELL_CLSID: &str = "{B3E8D47A-6C1F-4A92-9E05-8F4C2B17A6D0}";
 const SHELL_DLL_NAME: &str = "fastcopy_shell.dll";
 const SHELL_HANDLER: &str = "FastCopyShell";
+const COM_PROGIDS: &[&str] = &[
+    "*",
+    "Directory",
+    "Folder",
+    "AllFilesystemObjects",
+    r"SystemFileAssociations\video",
+    r"SystemFileAssociations\audio",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClipboardKind {
@@ -499,22 +507,16 @@ fn write_com_keys_at(hive: winreg::HKEY, classes: &str, dll: &str) -> Result<()>
     let (inproc, _) = clsid.create_subkey("InProcServer32")?;
     inproc.set_value("", &dll)?;
     inproc.set_value("ThreadingModel", &"Apartment")?;
-    for rel in [
-        format!(r"{classes}\*\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
-        format!(r"{classes}\Directory\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
-        format!(r"{classes}\AllFilesystemObjects\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
-    ] {
-        let (key, _) = root.create_subkey(rel)?;
+    for progid in COM_PROGIDS {
+        let (key, _) = root.create_subkey(format!(
+            r"{classes}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"
+        ))?;
         key.set_value("", &SHELL_CLSID)?;
+        let _ = delete_if_exists(
+            &root,
+            &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\FastCopyRust"),
+        );
     }
-    let _ = delete_if_exists(
-        &root,
-        &format!(r"{classes}\*\shellex\ContextMenuHandlers\FastCopyRust"),
-    );
-    let _ = delete_if_exists(
-        &root,
-        &format!(r"{classes}\Directory\shellex\ContextMenuHandlers\FastCopyRust"),
-    );
     if classes.eq_ignore_ascii_case(r"Software\Classes")
         || classes.eq_ignore_ascii_case(r"SOFTWARE\Classes")
     {
@@ -551,16 +553,12 @@ fn delete_approved_value(hive: winreg::HKEY) -> Result<()> {
 }
 
 fn com_handler_ready(hive: winreg::HKEY, classes: &str) -> bool {
-    hive_has(
-        hive,
-        &format!(r"{classes}\*\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
-    ) && hive_has(
-        hive,
-        &format!(r"{classes}\Directory\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
-    ) && hive_has(
-        hive,
-        &format!(r"{classes}\AllFilesystemObjects\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
-    ) && com_dll_path_matches(hive, classes)
+    COM_PROGIDS.iter().all(|progid| {
+        hive_has(
+            hive,
+            &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+        )
+    }) && com_dll_path_matches(hive, classes)
 }
 
 fn com_dll_path_matches(hive: winreg::HKEY, classes: &str) -> bool {
@@ -588,13 +586,18 @@ fn delete_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
         r"Directory\Background\shell\FastCopyRust",
         r"Directory\Background\shell\FastCopyPaste",
         r"Directory\Background\shell\FastCopyClear",
-        r"*\shellex\ContextMenuHandlers\FastCopyShell",
-        r"Directory\shellex\ContextMenuHandlers\FastCopyShell",
-        r"AllFilesystemObjects\shellex\ContextMenuHandlers\FastCopyShell",
-        r"*\shellex\ContextMenuHandlers\FastCopyRust",
-        r"Directory\shellex\ContextMenuHandlers\FastCopyRust",
     ] {
         delete_if_exists(&root, &format!(r"{classes}\{rel}"))?;
+    }
+    for progid in COM_PROGIDS {
+        delete_if_exists(
+            &root,
+            &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+        )?;
+        delete_if_exists(
+            &root,
+            &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\FastCopyRust"),
+        )?;
     }
     delete_if_exists(&root, &format!(r"{classes}\CLSID\{SHELL_CLSID}"))?;
     if classes.eq_ignore_ascii_case(r"Software\Classes")
@@ -637,13 +640,18 @@ pub fn unregister_machine() -> Result<()> {
         r"SOFTWARE\Classes\Directory\Background\shell\FastCopyRust",
         r"SOFTWARE\Classes\Directory\Background\shell\FastCopyPaste",
         r"SOFTWARE\Classes\Directory\Background\shell\FastCopyClear",
-        r"SOFTWARE\Classes\*\shellex\ContextMenuHandlers\FastCopyShell",
-        r"SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers\FastCopyShell",
-        r"SOFTWARE\Classes\AllFilesystemObjects\shellex\ContextMenuHandlers\FastCopyShell",
-        r"SOFTWARE\Classes\*\shellex\ContextMenuHandlers\FastCopyRust",
-        r"SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers\FastCopyRust",
     ] {
         delete_if_exists(&root, path)?;
+    }
+    for progid in COM_PROGIDS {
+        delete_if_exists(
+            &root,
+            &format!(r"SOFTWARE\Classes\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+        )?;
+        delete_if_exists(
+            &root,
+            &format!(r"SOFTWARE\Classes\{progid}\shellex\ContextMenuHandlers\FastCopyRust"),
+        )?;
     }
     delete_if_exists(
         &root,
@@ -1396,10 +1404,12 @@ mod tests {
         let dll = shell_dll_path().expect("shell dll path");
         assert!(dll.is_file(), "missing {}", dll.display());
         write_com_keys_at(HKEY_CURRENT_USER, TEST_CLASSES, &dll.to_string_lossy()).unwrap();
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{TEST_CLASSES}\*\shellex\ContextMenuHandlers\{SHELL_HANDLER}")
-        ));
+        for progid in COM_PROGIDS {
+            assert!(hive_has(
+                HKEY_CURRENT_USER,
+                &format!(r"{TEST_CLASSES}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}")
+            ));
+        }
         assert!(hive_has(
             HKEY_CURRENT_USER,
             &format!(r"{TEST_CLASSES}\CLSID\{SHELL_CLSID}\InProcServer32")
