@@ -1285,18 +1285,27 @@ impl eframe::App for RenameDialog {
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(4.0);
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.set_max_height(ui.available_height());
+                let remaining = ui.available_size();
+                let (content_rect, _) =
+                    ui.allocate_exact_size(remaining, egui::Sense::hover());
+                let mut ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(content_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                ui.set_clip_rect(content_rect);
+                ui.set_max_size(remaining);
+                {
                     let mut pattern_changed = false;
                     let mut ignore_ext_changed = false;
                     ui.colored_label(TEXT_SECONDARY, t.rename_old_list);
                     ui.colored_label(TEXT_SECONDARY, t.rename_old_list_hint);
                     let rest = ui.available_height();
-                    const MIDDLE: f32 = 196.0;
-                    let list_budget = (rest - MIDDLE).max(0.0);
-                    let old_h = (list_budget * 0.5).clamp(0.0, 220.0);
+                    const EXPR_BLOCK: f32 = 168.0;
+                    const MIN_NEW: f32 = 96.0;
+                    let old_h = (rest - EXPR_BLOCK - MIN_NEW).clamp(96.0, 180.0);
                     let old_id = ui.id().with("rename_old_names");
-                    names_editor(ui, old_h, &mut self.old_text, old_id);
+                    names_editor(&mut ui, old_h, &mut self.old_text, old_id);
                     let next_items = tools::reconcile_selection(
                         &self.source_items,
                         &self.items,
@@ -1318,9 +1327,9 @@ impl eframe::App for RenameDialog {
                     }
                     ui.add_space(8.0);
                     pattern_changed |=
-                        expression_edit(ui, t.rename_old_expr, &mut self.options.old_pattern);
+                        expression_edit(&mut ui, t.rename_old_expr, &mut self.options.old_pattern);
                     pattern_changed |=
-                        expression_edit(ui, t.rename_new_expr, &mut self.options.new_pattern);
+                        expression_edit(&mut ui, t.rename_new_expr, &mut self.options.new_pattern);
                     ui.horizontal(|ui| {
                         pattern_changed |= ui
                             .checkbox(&mut self.options.match_case, t.rename_match_case)
@@ -1345,11 +1354,11 @@ impl eframe::App for RenameDialog {
                     ui.colored_label(TEXT_SECONDARY, t.rename_new_list);
                     let new_h = ui.available_height().max(1.0);
                     let new_id = ui.id().with(("rename_new_names", self.new_edit_epoch));
-                    if names_editor(ui, new_h, &mut self.new_text, new_id) {
+                    if names_editor(&mut ui, new_h, &mut self.new_text, new_id) {
                         self.rebuild_from_new_text();
                         self.status.clear();
                     }
-                });
+                }
             });
         });
     }
@@ -1445,23 +1454,37 @@ fn expression_edit(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
 fn names_editor(ui: &mut egui::Ui, height: f32, text: &mut String, id: egui::Id) -> bool {
     let width = ui.available_width();
     let height = height.max(1.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.set_clip_rect(rect);
+    child.set_min_size(egui::vec2(width, height));
+    child.set_max_size(egui::vec2(width, height));
     let mut changed = false;
-    ui.allocate_ui(egui::vec2(width, height), |ui| {
-        ui.set_min_size(egui::vec2(width, height));
-        ui.set_max_size(egui::vec2(width, height));
-        changed = ui
-            .add_sized(
-                [width, height],
-                egui::TextEdit::multiline(text)
-                    .id(id)
-                    .desired_rows(1)
-                    .desired_width(width)
-                    .font(egui::TextStyle::Monospace)
-                    .background_color(SURFACE)
-                    .margin(egui::vec2(6.0, 4.0)),
-            )
-            .changed();
-    });
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .inner_margin(egui::Margin::same(4))
+        .show(&mut child, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(id.with("scroll"))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    changed = ui
+                        .add(
+                            egui::TextEdit::multiline(text)
+                                .id(id)
+                                .desired_width(ui.available_width())
+                                .desired_rows(1)
+                                .frame(egui::Frame::NONE)
+                                .font(egui::TextStyle::Monospace),
+                        )
+                        .changed();
+                });
+        });
     changed
 }
 

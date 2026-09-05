@@ -5,6 +5,7 @@ Each version section is English, then Chinese.
 
 ## unreleased
 
+- Batch rename lists keep a fixed height with a scrollbar, so expression fields and OK/Cancel stay visible when there are many files.
 - Batch rename from a folder lists that folder’s files first; you must select files before the rename page. The folder you right-clicked is not treated as the item to rename.
 - Debug `fastcopy.exe` no longer opens a console window when launched from Explorer (same as Release).
 - Batch rename is no longer on a multi-file selection. Right-click a folder or folder background.
@@ -15,6 +16,7 @@ Each version section is English, then Chinese.
 - Remove the Settings toggle for the symbolic/hard-link finish toast.
 - Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
 
+- 批量改名的原/新文件名列表固定高度并带滚动条，文件很多时表达式和确定/取消仍能看见。
 - 对文件夹做批量改名时，先列出该文件夹里的文件，勾选后才能进入改名页。右键的那个文件夹本身不会被当成改名对象。
 - Debug 的 `fastcopy.exe` 从资源管理器启动时不再弹出控制台黑窗口（与 Release 一样）。
 - 批量改名不再出现在多选文件的右键里。改为右键文件夹或文件夹空白处。
