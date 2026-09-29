@@ -43,6 +43,7 @@ struct ActiveTask {
     handle: EngineHandle,
     progress: ProgressSnapshot,
     started: Instant,
+    rate_samples: VecDeque<(Instant, u64, u64)>,
 }
 
 struct LastResult {
@@ -252,8 +253,25 @@ impl FastCopyApp {
                     ..ProgressSnapshot::default()
                 },
                 started: Instant::now(),
+                rate_samples: VecDeque::new(),
             });
         }
+    }
+
+    fn sample_copy_rate(&mut self) {
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        if active.progress.scanning {
+            active.rate_samples.clear();
+            return;
+        }
+        push_rate_sample(
+            &mut active.rate_samples,
+            Instant::now(),
+            active.progress.completed_bytes,
+            active.progress.completed_items,
+        );
     }
 
     fn apply_window_mode(&mut self, context: &egui::Context) {
@@ -329,7 +347,7 @@ impl FastCopyApp {
                             t.scanned(progress.total_items, &format_bytes(progress.total_bytes)),
                         );
                     } else {
-                        let speed = progress.completed_bytes as f64 / elapsed;
+                        let (speed, items_per_sec) = window_rates(&active.rate_samples);
                         let remaining = if speed > 0.0 {
                             progress
                                 .total_bytes
@@ -339,7 +357,6 @@ impl FastCopyApp {
                         } else {
                             0.0
                         };
-                        let items_per_sec = progress.completed_items as f64 / elapsed;
                         ui.columns(2, |columns| {
                             show_metric(
                                 &mut columns[0],
@@ -363,7 +380,15 @@ impl FastCopyApp {
                                 t.file_speed,
                                 &t.items_per_sec(items_per_sec),
                             );
-                            show_metric(&mut columns[1], t.eta, &format_duration(remaining));
+                            show_metric(
+                                &mut columns[1],
+                                t.eta,
+                                &if speed > 0.0 {
+                                    format_duration(remaining)
+                                } else {
+                                    "--:--".to_owned()
+                                },
+                            );
                         });
                     }
                     ui.add_space(8.0);
@@ -718,6 +743,7 @@ impl eframe::App for FastCopyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         self.process_engine_events();
+        self.sample_copy_rate();
         if self.last_pending_check.elapsed() >= Duration::from_millis(300) {
             self.last_pending_check = Instant::now();
             self.collect_pending_commands();
@@ -1671,6 +1697,35 @@ fn progress_fraction(progress: &ProgressSnapshot) -> f32 {
     }
 }
 
+const SPEED_WINDOW: Duration = Duration::from_secs(1);
+const SPEED_MIN_SPAN: Duration = Duration::from_millis(200);
+
+fn push_rate_sample(samples: &mut VecDeque<(Instant, u64, u64)>, now: Instant, bytes: u64, items: u64) {
+    samples.push_back((now, bytes, items));
+    let keep_after = now.checked_sub(SPEED_WINDOW).unwrap_or(now);
+    while samples.len() >= 2 && samples[1].0 <= keep_after {
+        samples.pop_front();
+    }
+}
+
+fn window_rates(samples: &VecDeque<(Instant, u64, u64)>) -> (f64, f64) {
+    let Some((start, start_bytes, start_items)) = samples.front() else {
+        return (0.0, 0.0);
+    };
+    let Some((end, end_bytes, end_items)) = samples.back() else {
+        return (0.0, 0.0);
+    };
+    let span = end.saturating_duration_since(*start);
+    if span < SPEED_MIN_SPAN {
+        return (0.0, 0.0);
+    }
+    let seconds = span.as_secs_f64();
+    (
+        end_bytes.saturating_sub(*start_bytes) as f64 / seconds,
+        end_items.saturating_sub(*start_items) as f64 / seconds,
+    )
+}
+
 fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -1683,6 +1738,41 @@ fn format_bytes(bytes: u64) -> String {
         format!("{bytes} {}", UNITS[unit])
     } else {
         format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::{push_rate_sample, window_rates, SPEED_WINDOW};
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    fn at(base: Instant, ms: u64) -> Instant {
+        base + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn recent_window_ignores_earlier_burst() {
+        let base = Instant::now();
+        let mut samples = VecDeque::new();
+        let fast = 110 * 1024 * 1024;
+        push_rate_sample(&mut samples, at(base, 0), 0, 0);
+        push_rate_sample(&mut samples, at(base, 1000), fast, 10);
+        push_rate_sample(&mut samples, at(base, 2000), fast + 10 * 1024 * 1024, 11);
+        let (bytes_per_sec, items_per_sec) = window_rates(&samples);
+        let mib = bytes_per_sec / 1024.0 / 1024.0;
+        assert!((mib - 10.0).abs() < 0.2, "mib/s={mib}");
+        assert!((items_per_sec - 1.0).abs() < 0.05, "items/s={items_per_sec}");
+        assert!(samples.front().unwrap().0.saturating_duration_since(base) >= SPEED_WINDOW);
+    }
+
+    #[test]
+    fn short_span_reports_zero() {
+        let base = Instant::now();
+        let mut samples = VecDeque::new();
+        push_rate_sample(&mut samples, at(base, 0), 0, 0);
+        push_rate_sample(&mut samples, at(base, 50), 50 * 1024 * 1024, 3);
+        assert_eq!(window_rates(&samples), (0.0, 0.0));
     }
 }
 
