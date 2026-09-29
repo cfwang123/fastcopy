@@ -1697,7 +1697,7 @@ fn progress_fraction(progress: &ProgressSnapshot) -> f32 {
     }
 }
 
-const SPEED_WINDOW: Duration = Duration::from_secs(1);
+const SPEED_WINDOW: Duration = Duration::from_secs(3);
 const SPEED_MIN_SPAN: Duration = Duration::from_millis(200);
 
 fn push_rate_sample(samples: &mut VecDeque<(Instant, u64, u64)>, now: Instant, bytes: u64, items: u64) {
@@ -1758,12 +1758,12 @@ mod rate_tests {
         let fast = 110 * 1024 * 1024;
         push_rate_sample(&mut samples, at(base, 0), 0, 0);
         push_rate_sample(&mut samples, at(base, 1000), fast, 10);
-        push_rate_sample(&mut samples, at(base, 2000), fast + 10 * 1024 * 1024, 11);
+        push_rate_sample(&mut samples, at(base, 4000), fast + 30 * 1024 * 1024, 13);
         let (bytes_per_sec, items_per_sec) = window_rates(&samples);
         let mib = bytes_per_sec / 1024.0 / 1024.0;
         assert!((mib - 10.0).abs() < 0.2, "mib/s={mib}");
         assert!((items_per_sec - 1.0).abs() < 0.05, "items/s={items_per_sec}");
-        assert!(samples.front().unwrap().0.saturating_duration_since(base) >= SPEED_WINDOW);
+        assert!(samples.front().unwrap().0 >= at(base, 4000) - SPEED_WINDOW);
     }
 
     #[test]

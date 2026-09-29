@@ -61,7 +61,7 @@ Copy/move with Settings **Preserve as links** still recreates symbolic links in-
 
 ## After a command runs
 
-Opening the app with no menu task shows Settings. Save settings and Close stay visible at the bottom. Copy, move, and delete show only the progress window (scan, speed, time remaining, pause/cancel). Speed and files/s use roughly the last second of completed work, and time remaining uses that same speed. The window closes on success; a toast is shown if that option is enabled in Settings. The toast is sent as FastCopy, not PowerShell. The window stays open if there were errors so you can retry or export the list. Symbolic/hard-link paste does not toast; see [Symbolic and hard links](#symbolic-and-hard-links).
+Opening the app with no menu task shows Settings. Save settings and Close stay visible at the bottom. Copy, move, and delete show only the progress window (scan, speed, time remaining, pause/cancel). Speed and files/s use the last 3 seconds of completed work, and time remaining uses that same speed. The window closes on success; a toast is shown if that option is enabled in Settings. The toast is sent as FastCopy, not PowerShell. The window stays open if there were errors so you can retry or export the list. Symbolic/hard-link paste does not toast; see [Symbolic and hard links](#symbolic-and-hard-links).
 
 Permanent delete does not use the Recycle Bin; the app asks for confirmation first (CLI: skip with `--yes`). Cancelling a copy removes unfinished new destination files. Overwrites write a temporary file first, then replace, so the original stays until replacement finishes.
 

@@ -5,7 +5,7 @@ Each version section is English, then Chinese.
 
 ## unreleased
 
-- Real-time speed, files/s, and time remaining follow the last ~1s of completed bytes, so a fast start no longer keeps the speed high after the copy slows down. With no recent progress the remaining time shows `--:--`.
+- Real-time speed, files/s, and time remaining follow the last 3 seconds of completed bytes, so a fast start no longer keeps the speed high after the copy slows down. With no recent progress the remaining time shows `--:--`.
 - Batch rename lists keep a fixed height with a scrollbar, so expression fields and OK/Cancel stay visible when there are many files.
 - Batch rename from a folder lists that folder’s files first; you must select files before the rename page. The folder you right-clicked is not treated as the item to rename.
 - Debug `fastcopy.exe` no longer opens a console window when launched from Explorer (same as Release).
@@ -17,7 +17,7 @@ Each version section is English, then Chinese.
 - Remove the Settings toggle for the symbolic/hard-link finish toast.
 - Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
 
-- 实时速度、文件速度和预计剩余按最近约 1 秒的已完成量计算。开头很快、后面变慢时，速度不再停在高位。最近没有进度时，预计剩余显示 `--:--`。
+- 实时速度、文件速度和预计剩余按最近 3 秒的已完成量计算。开头很快、后面变慢时，速度不再停在高位。最近没有进度时，预计剩余显示 `--:--`。
 - 批量改名的原/新文件名列表固定高度并带滚动条，文件很多时表达式和确定/取消仍能看见。
 - 对文件夹做批量改名时，先列出该文件夹里的文件，勾选后才能进入改名页。右键的那个文件夹本身不会被当成改名对象。
 - Debug 的 `fastcopy.exe` 从资源管理器启动时不再弹出控制台黑窗口（与 Release 一样）。
