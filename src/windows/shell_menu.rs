@@ -331,12 +331,65 @@ pub fn refresh_background_verbs() {
         if show_background_verbs().is_ok() || icons_changed {
             notify_assoc_changed();
         }
+        sync_rename_menu();
         return;
     }
     sync_background_verbs(false);
     if icons_changed {
         notify_assoc_changed();
     }
+    sync_rename_menu();
+}
+
+pub fn sync_rename_menu() {
+    let enabled = batch_rename_menu_enabled();
+    let mut changed = false;
+    for (hive, classes) in [
+        (HKEY_CURRENT_USER, r"Software\Classes"),
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes"),
+    ] {
+        changed |= apply_rename_menu(hive, classes, enabled).unwrap_or(false);
+    }
+    if changed {
+        notify_assoc_changed();
+    }
+}
+
+fn batch_rename_menu_enabled() -> bool {
+    read_json::<Settings>(&settings_path())
+        .map(|settings| settings.batch_rename_menu)
+        .unwrap_or(false)
+}
+
+fn apply_rename_menu(hive: winreg::HKEY, classes: &str, enabled: bool) -> Result<bool> {
+    let root = RegKey::predef(hive);
+    let mut changed = false;
+    for path in [
+        format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_RENAME}"),
+        format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_RENAME}"),
+        format!(r"{classes}\{BACKGROUND_RENAME_VERB}"),
+    ] {
+        let Ok(key) = root.open_subkey_with_flags(&path, KEY_READ | KEY_SET_VALUE) else {
+            continue;
+        };
+        if verb_key_hidden(&key) == !enabled {
+            continue;
+        }
+        if enabled {
+            delete_value_if_exists(&key, "LegacyDisable")?;
+            delete_value_if_exists(&key, "ProgrammaticAccessOnly")?;
+        } else {
+            key.set_value("LegacyDisable", &"")?;
+            key.set_value("ProgrammaticAccessOnly", &"")?;
+        }
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn verb_key_hidden(key: &RegKey) -> bool {
+    key.get_value::<String, _>("LegacyDisable").is_ok()
+        && key.get_value::<String, _>("ProgrammaticAccessOnly").is_ok()
 }
 
 pub fn try_update_menu_labels() {
@@ -451,6 +504,7 @@ fn register_hive(hive: winreg::HKEY, classes: &str) -> Result<()> {
         &format!(r"{classes}\Directory\Background\shell\FastCopyRust"),
     )?;
     apply_background_verbs(clipboard_has_items())?;
+    let _ = apply_rename_menu(hive, classes, batch_rename_menu_enabled());
     notify_assoc_changed();
     Ok(())
 }
@@ -1532,6 +1586,15 @@ mod tests {
             HKEY_CURRENT_USER,
             &format!(r"{dir_key}\{CASCADE_RENAME}")
         ));
+        let rename_key = format!(r"{dir_key}\{CASCADE_RENAME}");
+        let background_rename = format!(r"{TEST_CLASSES}\{BACKGROUND_RENAME_VERB}");
+        assert!(apply_rename_menu(HKEY_CURRENT_USER, TEST_CLASSES, false).unwrap());
+        assert!(verb_is_hidden(HKEY_CURRENT_USER, &rename_key));
+        assert!(verb_is_hidden(HKEY_CURRENT_USER, &background_rename));
+        assert!(apply_rename_menu(HKEY_CURRENT_USER, TEST_CLASSES, true).unwrap());
+        assert!(!verb_is_hidden(HKEY_CURRENT_USER, &rename_key));
+        assert!(!verb_is_hidden(HKEY_CURRENT_USER, &background_rename));
+        assert!(!apply_rename_menu(HKEY_CURRENT_USER, TEST_CLASSES, true).unwrap());
         assert!(hive_has(
             HKEY_CURRENT_USER,
             &format!(r"{TEST_CLASSES}\{BACKGROUND_RENAME_VERB}")

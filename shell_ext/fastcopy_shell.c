@@ -40,6 +40,7 @@ static void handler_clear_bitmaps(struct Handler *h);
 static HRESULT launch(struct Handler *h, UINT id);
 static int exe_path(WCHAR *out, UINT cap);
 static int menu_has_cascade(HMENU menu);
+static int rename_menu_enabled(void);
 static void read_label(const WCHAR *sub, WCHAR *out, UINT cap, const WCHAR *fallback);
 static HBITMAP load_icon_bitmap(const WCHAR *name);
 static void insert_cmd(HMENU sub, UINT pos, UINT id, const WCHAR *subkey, const WCHAR *fallback, HBITMAP bmp);
@@ -83,7 +84,7 @@ static HRESULT STDMETHODCALLTYPE Menu_QueryContextMenu(IContextMenu *this, HMENU
 	insert_cmd(sub, 4, idCmdFirst + CMD_HARDLINK, L"shell\\5hardlink", L"Copy as hard link", h->bmp[BMP_COPY]);
 	insert_cmd(sub, 5, idCmdFirst + CMD_SIZE, L"shell\\7size", L"Folder size", h->bmp[BMP_SIZE]);
 	insert_cmd(sub, 6, idCmdFirst + CMD_COPYPATH, L"shell\\8copypath", L"Copy paths", h->bmp[BMP_PATH]);
-	if(h->is_folder){
+	if(h->is_folder && rename_menu_enabled()){
 		insert_cmd(sub, 7, idCmdFirst + CMD_RENAME, L"shell\\9rename", L"Batch rename", h->bmp[BMP_RENAME]);
 		InsertMenuW(sub, 8, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
 		insert_cmd(sub, 9, idCmdFirst + CMD_SETTINGS, L"shell\\zsettings", L"Settings", h->bmp[BMP_SETTINGS]);
@@ -369,6 +370,29 @@ static void strip_amp(WCHAR *s){
 		else *w++ = *r++;
 	}
 	*w = 0;
+}
+
+static int reg_has_legacy_disable(HKEY hive, const WCHAR *path){
+	HKEY key;
+	DWORD n, type;
+	WCHAR value[8];
+	if(RegOpenKeyExW(hive, path, 0, KEY_READ, &key) != 0) return -1;
+	n = sizeof(value);
+	if(RegQueryValueExW(key, L"LegacyDisable", NULL, &type, (BYTE *)value, &n) == 0){
+		RegCloseKey(key);
+		return 1;
+	}
+	RegCloseKey(key);
+	return 0;
+}
+
+static int rename_menu_enabled(void){
+	int user = reg_has_legacy_disable(HKEY_CURRENT_USER, L"Software\\Classes\\Directory\\shell\\FastCopyRust\\shell\\9rename");
+	int machine;
+	if(user >= 0) return user == 0;
+	machine = reg_has_legacy_disable(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\Directory\\shell\\FastCopyRust\\shell\\9rename");
+	if(machine >= 0) return machine == 0;
+	return 0;
 }
 
 static int menu_has_cascade(HMENU menu){

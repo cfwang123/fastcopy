@@ -5,6 +5,7 @@ Each version section is English, then Chinese.
 
 ## unreleased
 
+- Settings can show or hide the Explorer **Batch rename** command. It is off by default, including on the folder submenu and on a folder background. Saving the checkbox applies it on the next menu. After this update, restart Explorer so it loads the new `fastcopy_shell.dll`.
 - The Explorer submenu appears once. The registry cascade stays as the COM handler’s label source and is hidden, so it is no longer listed together with the shell extension.
 - Real-time speed, files/s, and time remaining follow the last 3 seconds of completed bytes, so a fast start no longer keeps the speed high after the copy slows down. With no recent progress the remaining time shows `--:--`.
 - Batch rename lists keep a fixed height with a scrollbar, so expression fields and OK/Cancel stay visible when there are many files.
@@ -18,6 +19,7 @@ Each version section is English, then Chinese.
 - Remove the Settings toggle for the symbolic/hard-link finish toast.
 - Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
 
+- 参数设置可启用或关闭右键「批量改名」，默认关闭。文件夹子菜单和文件夹空白处一起生效。勾选后即写入设置，下次打开右键菜单生效。更新后请重启资源管理器，以便加载新的 `fastcopy_shell.dll`。
 - 右键「快速复制」只出现一次。注册表级联菜单仍给 COM 扩展提供文字，但不再显示，因此不会和扩展各占一条。
 - 实时速度、文件速度和预计剩余按最近 3 秒的已完成量计算。开头很快、后面变慢时，速度不再停在高位。最近没有进度时，预计剩余显示 `--:--`。
 - 批量改名的原/新文件名列表固定高度并带滚动条，文件很多时表达式和确定/取消仍能看见。

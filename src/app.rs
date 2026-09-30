@@ -681,6 +681,20 @@ impl FastCopyApp {
                 );
             });
         ui.checkbox(&mut self.settings.notify_on_finish, t.notify_on_finish);
+        if ui
+            .checkbox(&mut self.settings.batch_rename_menu, t.batch_rename_menu)
+            .changed()
+        {
+            match save_settings(&self.settings) {
+                Ok(()) => {
+                    shell_menu::sync_rename_menu();
+                    self.settings_status = t.settings_saved.to_owned();
+                }
+                Err(error) => {
+                    self.settings_status = t.settings_save_failed(&error.to_string());
+                }
+            }
+        }
         ui.separator();
         ui.label(t.shell_status(self.shell_user, self.shell_machine));
         ui.horizontal_wrapped(|ui| {
