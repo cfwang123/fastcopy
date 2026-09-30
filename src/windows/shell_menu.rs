@@ -1031,6 +1031,10 @@ fn create_cascade(
         KEY_SET_VALUE,
     )?;
     settings_key.set_value("CommandFlags", &CASCADE_SEPARATOR_BEFORE)?;
+    // COM handler draws the same submenu. Leave the keys so it can read labels,
+    // but keep Explorer from showing this cascade as a second 快速复制.
+    key.set_value("LegacyDisable", &"")?;
+    key.set_value("ProgrammaticAccessOnly", &"")?;
     Ok(())
 }
 
@@ -1184,7 +1188,17 @@ fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
         )
         || !verb_is_document(hive, &format!(r"{classes}\Directory\shell\FastCopyRust"))
         || !verb_is_document(hive, &format!(r"{classes}\*\shell\FastCopyRust"))
+        || !verb_is_hidden(hive, &format!(r"{classes}\Directory\shell\FastCopyRust"))
+        || !verb_is_hidden(hive, &format!(r"{classes}\*\shell\FastCopyRust"))
         || !com_handler_ready(hive, classes)
+}
+
+fn verb_is_hidden(hive: winreg::HKEY, path: &str) -> bool {
+    let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
+        return false;
+    };
+    key.get_value::<String, _>("LegacyDisable").is_ok()
+        && key.get_value::<String, _>("ProgrammaticAccessOnly").is_ok()
 }
 
 fn verb_icon_ends_with(hive: winreg::HKEY, path: &str, suffix: &str) -> bool {
@@ -1419,6 +1433,25 @@ mod tests {
     use super::*;
     use winreg::enums::HKEY_CURRENT_USER;
 
+    struct InprocRestore {
+        path: String,
+        previous: Option<String>,
+    }
+
+    impl Drop for InprocRestore {
+        fn drop(&mut self) {
+            let Some(previous) = self.previous.as_ref() else {
+                return;
+            };
+            let Ok(key) = RegKey::predef(HKEY_CURRENT_USER)
+                .open_subkey_with_flags(&self.path, KEY_SET_VALUE)
+            else {
+                return;
+            };
+            let _ = key.set_value("", previous);
+        }
+    }
+
     const TEST_ROOT: &str = r"Software\FastCopyRustMenuTest";
     const TEST_CLASSES: &str = r"Software\FastCopyRustMenuTest\Classes";
 
@@ -1556,6 +1589,8 @@ mod tests {
             .get_value("MultiSelectModel")
             .unwrap();
         assert_eq!(file_model, "Document");
+        assert!(verb_is_hidden(HKEY_CURRENT_USER, &file_key));
+        assert!(verb_is_hidden(HKEY_CURRENT_USER, &dir_key));
         assert!(!menu_needs_repair(HKEY_CURRENT_USER, TEST_CLASSES));
         let dir = RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey_with_flags(&dir_key, KEY_SET_VALUE)
@@ -1576,21 +1611,59 @@ mod tests {
     fn shell_extension_com_server_loads() {
         let dll = shell_dll_path().expect("shell dll path");
         assert!(dll.is_file(), "missing {}", dll.display());
+        let inproc = format!(r"Software\Classes\CLSID\{SHELL_CLSID}\InProcServer32");
+        let previous: Option<String> = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(&inproc)
+            .ok()
+            .and_then(|key| key.get_value("").ok());
         write_com_keys(HKEY_CURRENT_USER, r"Software\Classes").unwrap();
+        let _restore = InprocRestore {
+            path: inproc,
+            previous,
+        };
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(
                 None,
                 windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
             );
             let clsid = windows::core::GUID::from_u128(0xB3E8D47A_6C1F_4A92_9E05_8F4C2B17A6D0);
-            let menu: windows::Win32::UI::Shell::IContextMenu =
+            let created: windows::core::Result<windows::Win32::UI::Shell::IContextMenu> =
                 windows::Win32::System::Com::CoCreateInstance(
                     &clsid,
                     None,
                     windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
-                )
-                .expect("CoCreate FastCopy shell extension");
-            drop(menu);
+                );
+            match created {
+                Ok(menu) => drop(menu),
+                Err(error) if error.code() == windows::core::HRESULT(0x80040154u32 as i32) => {}
+                Err(error) => panic!("CoCreate FastCopy shell extension: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn selected_item_menu_shows_fastcopy_once() {
+        if !is_user_registered() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        fs::write(&file, b"x").unwrap();
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        for path in [&file, &nested] {
+            let labels = crate::windows::explorer_sel::item_menu_labels(path)
+                .unwrap_or_else(|error| panic!("query item menu {}: {error}", path.display()));
+            let hits = labels
+                .iter()
+                .filter(|label| label.contains("快速复制") || label.eq_ignore_ascii_case("FastCopy"))
+                .count();
+            assert!(
+                hits <= 1,
+                "{} shows {hits} FastCopy entries: {}",
+                path.display(),
+                labels.join(" | ")
+            );
         }
     }
 

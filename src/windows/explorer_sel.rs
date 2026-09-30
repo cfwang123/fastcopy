@@ -122,6 +122,18 @@ fn selection_from_browser(browser: &IWebBrowserApp) -> windows::core::Result<Vec
     }
 }
 
+#[cfg(test)]
+pub fn item_menu_labels(path: &Path) -> windows::core::Result<Vec<String>> {
+    use windows::Win32::UI::Shell::BHID_SFUIObject;
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let item: IShellItem =
+            SHCreateItemFromParsingName(&HSTRING::from(path.to_string_lossy().as_ref()), None)?;
+        let menu: IContextMenu = item.BindToHandler(None, &BHID_SFUIObject)?;
+        labels_from_context_menu(&menu)
+    }
+}
+
 pub fn background_menu_labels(folder: &Path) -> windows::core::Result<Vec<String>> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
