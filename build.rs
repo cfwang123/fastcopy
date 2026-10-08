@@ -8,8 +8,9 @@ fn main() {
     } else {
         version.to_owned()
     };
+    let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let mut resource = winres::WindowsResource::new();
-    resource.set_icon("assets/icons/app.ico");
+    resource.set_icon(manifest.join("assets/icons/app.ico").to_str().unwrap());
     resource.set("ProductName", "FastCopy");
     resource.set("FileDescription", "FastCopy");
     resource.set("FileVersion", &file_version);

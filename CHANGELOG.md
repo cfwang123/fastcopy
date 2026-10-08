@@ -5,6 +5,8 @@ Each version section is English, then Chinese.
 
 ## unreleased
 
+- Windows resource compile uses an absolute icon path, so `cargo build` still finds `assets/icons/app.ico` when the build script’s working directory is not the project root.
+- Unregister removes every Explorer **FastCopy** entry: the shell extension and the leftover registry cascade (`FastCopyRust` on files and folders, plus every `FastCopyShell` handler). A second **快速复制** does not stay behind. The cascade is no longer a visible menu; its wording is stored outside `shell`. The handler is registered once, on `AllFilesystemObjects`. After this update, start the app once and restart Explorer.
 - Settings can show or hide the Explorer **Batch rename** command. It is off by default, including on the folder submenu and on a folder background. Saving the checkbox applies it on the next menu. After this update, restart Explorer so it loads the new `fastcopy_shell.dll`.
 - The Explorer submenu appears once. The registry cascade stays as the COM handler’s label source and is hidden, so it is no longer listed together with the shell extension.
 - Real-time speed, files/s, and time remaining follow the last 3 seconds of completed bytes, so a fast start no longer keeps the speed high after the copy slows down. With no recent progress the remaining time shows `--:--`.
@@ -19,6 +21,8 @@ Each version section is English, then Chinese.
 - Remove the Settings toggle for the symbolic/hard-link finish toast.
 - Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
 
+- 编译 Windows 资源时使用图标的绝对路径，构建脚本的工作目录不是项目根时也能找到 `assets/icons/app.ico`。
+- 卸载右键菜单时，会同时删掉外壳扩展和残留的注册表级联菜单（文件/文件夹上的 `FastCopyRust`，以及每一处 `FastCopyShell`）。不会留下第二条「快速复制」。级联菜单不再作为可见菜单注册，文案改存到 `shell` 之外。处理程序只在 `AllFilesystemObjects` 注册一次。更新后请启动一次程序，并重启资源管理器。
 - 参数设置可启用或关闭右键「批量改名」，默认关闭。文件夹子菜单和文件夹空白处一起生效。勾选后即写入设置，下次打开右键菜单生效。更新后请重启资源管理器，以便加载新的 `fastcopy_shell.dll`。
 - 右键「快速复制」只出现一次。注册表级联菜单仍给 COM 扩展提供文字，但不再显示，因此不会和扩展各占一条。
 - 实时速度、文件速度和预计剩余按最近 3 秒的已完成量计算。开头很快、后面变慢时，速度不再停在高位。最近没有进度时，预计剩余显示 `--:--`。

@@ -43,18 +43,35 @@ const CASCADE_COPY_PATHS: &str = r"shell\8copypath";
 const CASCADE_RENAME: &str = r"shell\9rename";
 const CASCADE_SETTINGS: &str = r"shell\zsettings";
 const BACKGROUND_RENAME_VERB: &str = r"Directory\Background\shell\FastCopyRename";
-const CASCADE_SEPARATOR_BEFORE: u32 = 0x20;
-const LINK_APPLIES_TO: &str = "System.FileExtension:.lnk OR System.FileAttributes:1024";
 const SHELL_CLSID: &str = "{B3E8D47A-6C1F-4A92-9E05-8F4C2B17A6D0}";
 const SHELL_DLL_NAME: &str = "fastcopy_shell.dll";
 const SHELL_HANDLER: &str = "FastCopyShell";
-const COM_PROGIDS: &[&str] = &[
+/// One progid, so Explorer invokes the submenu once.
+const COM_REGISTER_PROGIDS: &[&str] = &["AllFilesystemObjects"];
+/// Every progid that has carried a FastCopy handler. Unregister deletes all of them.
+const COM_CLEANUP_PROGIDS: &[&str] = &[
     "*",
     "Directory",
     "Folder",
     "AllFilesystemObjects",
+    "Drive",
+    "LibraryFolder",
     r"SystemFileAssociations\video",
     r"SystemFileAssociations\audio",
+];
+/// Registry cascades that draw a second top-level 快速复制. Kept out of Explorer.
+const VISIBLE_CASCADES: &[&str] = &[
+    r"*\shell\FastCopyRust",
+    r"Directory\shell\FastCopyRust",
+    r"Directory\shell\FastCopyCut",
+    r"Directory\shell\FastCopyCopy",
+    r"Directory\shell\FastCopyDelete",
+    r"Directory\shell\FastCopyPaste",
+    r"Directory\Background\shell\FastCopyRust",
+    r"Drive\shell\FastCopyRust",
+    r"Folder\shell\FastCopyRust",
+    r"AllFilesystemObjects\shell\FastCopyRust",
+    r"LibraryFolder\shell\FastCopyRust",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,8 +382,7 @@ fn apply_rename_menu(hive: winreg::HKEY, classes: &str, enabled: bool) -> Result
     let root = RegKey::predef(hive);
     let mut changed = false;
     for path in [
-        format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_RENAME}"),
-        format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_RENAME}"),
+        format!(r"{}\{CASCADE_RENAME}", menu_store(classes)),
         format!(r"{classes}\{BACKGROUND_RENAME_VERB}"),
     ] {
         let Ok(key) = root.open_subkey_with_flags(&path, KEY_READ | KEY_SET_VALUE) else {
@@ -399,66 +415,15 @@ pub fn try_update_menu_labels() {
         (HKEY_CURRENT_USER, r"Software\Classes"),
         (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes"),
     ] {
-        for parent in [
-            format!(r"{classes}\*\shell\FastCopyRust"),
-            format!(r"{classes}\Directory\shell\FastCopyRust"),
-        ] {
-            updated |= set_verb_label(hive, &parent, t.menu_cascade).is_ok();
-            updated |=
-                set_verb_label(hive, &format!(r"{parent}\{CASCADE_CUT}"), t.menu_cut).is_ok();
-            updated |=
-                set_verb_label(hive, &format!(r"{parent}\{CASCADE_COPY}"), t.menu_copy).is_ok();
-            updated |=
-                set_verb_label(hive, &format!(r"{parent}\{CASCADE_DELETE}"), t.menu_delete).is_ok();
-            updated |= set_verb_label(
-                hive,
-                &format!(r"{parent}\{CASCADE_SYMLINK}"),
-                t.menu_copy_symlink,
-            )
-            .is_ok();
-            updated |= set_verb_label(
-                hive,
-                &format!(r"{parent}\{CASCADE_HARDLINK}"),
-                t.menu_copy_hardlink,
-            )
-            .is_ok();
-            updated |= set_verb_label(
-                hive,
-                &format!(r"{parent}\{CASCADE_OPEN_TARGET}"),
-                t.menu_open_target,
-            )
-            .is_ok();
-            updated |= set_verb_label(
-                hive,
-                &format!(r"{parent}\{CASCADE_SHOW_SOURCE}"),
-                t.menu_show_source,
-            )
-            .is_ok();
-            updated |= set_verb_label(
-                hive,
-                &format!(r"{parent}\{CASCADE_SIZE}"),
-                t.menu_size,
-            )
-            .is_ok();
-            updated |= set_verb_label(
-                hive,
-                &format!(r"{parent}\{CASCADE_COPY_PATHS}"),
-                t.menu_copy_paths,
-            )
-            .is_ok();
-            updated |= set_verb_label(
-                hive,
-                &format!(r"{parent}\{CASCADE_SETTINGS}"),
-                t.settings_title,
-            )
-            .is_ok();
+        let store = menu_store(classes);
+        for (sub, label) in menu_label_entries(t) {
+            let path = if sub.is_empty() {
+                store.clone()
+            } else {
+                format!(r"{store}\{sub}")
+            };
+            updated |= set_verb_label(hive, &path, label).is_ok();
         }
-        updated |= set_verb_label(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_RENAME}"),
-            t.menu_rename,
-        )
-        .is_ok();
         updated |= set_background_verb_label(
             hive,
             &format!(r"{classes}\{BACKGROUND_RENAME_VERB}"),
@@ -474,17 +439,27 @@ pub fn try_update_menu_labels() {
 }
 
 pub fn is_user_registered() -> bool {
-    hive_has(
-        HKEY_CURRENT_USER,
-        r"Software\Classes\Directory\shell\FastCopyRust",
-    ) || hive_has(HKEY_CURRENT_USER, r"Software\Classes\*\shell\FastCopyRust")
+    shell_menu_present(HKEY_CURRENT_USER, r"Software\Classes")
 }
 
 pub fn is_machine_registered() -> bool {
-    hive_has(
-        HKEY_LOCAL_MACHINE,
-        r"SOFTWARE\Classes\Directory\shell\FastCopyRust",
-    ) || hive_has(HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes\*\shell\FastCopyRust")
+    shell_menu_present(HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes")
+}
+
+fn shell_menu_present(hive: winreg::HKEY, classes: &str) -> bool {
+    visible_cascade_present(hive, classes) || com_handler_installed(hive, classes)
+}
+
+fn com_handler_installed(hive: winreg::HKEY, classes: &str) -> bool {
+    COM_CLEANUP_PROGIDS.iter().any(|progid| {
+        hive_has(
+            hive,
+            &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+        ) || hive_has(
+            hive,
+            &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\FastCopyRust"),
+        )
+    })
 }
 
 pub fn register() -> Result<()> {
@@ -509,26 +484,55 @@ fn register_hive(hive: winreg::HKEY, classes: &str) -> Result<()> {
     Ok(())
 }
 
+fn menu_store(classes: &str) -> String {
+    let prefix = classes
+        .strip_suffix("\\Classes")
+        .or_else(|| classes.strip_suffix("\\classes"))
+        .unwrap_or(classes);
+    format!(r"{prefix}\FastCopyMenu")
+}
+
+fn menu_label_entries(t: &'static crate::i18n::Strings) -> [(&'static str, &'static str); 12] {
+    [
+        ("", t.menu_cascade),
+        (CASCADE_CUT, t.menu_cut),
+        (CASCADE_COPY, t.menu_copy),
+        (CASCADE_DELETE, t.menu_delete),
+        (CASCADE_SYMLINK, t.menu_copy_symlink),
+        (CASCADE_HARDLINK, t.menu_copy_hardlink),
+        (CASCADE_OPEN_TARGET, t.menu_open_target),
+        (CASCADE_SHOW_SOURCE, t.menu_show_source),
+        (CASCADE_SIZE, t.menu_size),
+        (CASCADE_COPY_PATHS, t.menu_copy_paths),
+        (CASCADE_RENAME, t.menu_rename),
+        (CASCADE_SETTINGS, t.settings_title),
+    ]
+}
+
+fn write_menu_labels(root: &RegKey, store: &str, t: &'static crate::i18n::Strings) -> Result<()> {
+    for (sub, label) in menu_label_entries(t) {
+        let path = if sub.is_empty() {
+            store.to_string()
+        } else {
+            format!(r"{store}\{sub}")
+        };
+        let (key, _) = root.create_subkey(path)?;
+        key.set_value("MUIVerb", &label)?;
+    }
+    Ok(())
+}
+
 fn write_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
     let t = ui_strings();
     let executable = env::current_exe().context(t.cannot_get_exe_path())?;
     let executable = executable.to_string_lossy();
     let icons = install_menu_icons()?;
     let root = RegKey::predef(hive);
-    create_cascade(
-        &root,
-        &format!(r"{classes}\*\shell\FastCopyRust"),
-        &executable,
-        &icons,
-        false,
-    )?;
-    create_cascade(
-        &root,
-        &format!(r"{classes}\Directory\shell\FastCopyRust"),
-        &executable,
-        &icons,
-        true,
-    )?;
+    // Labels stay outside shell\ so Explorer cannot draw a second 快速复制.
+    write_menu_labels(&root, &menu_store(classes), t)?;
+    for rel in VISIBLE_CASCADES {
+        delete_if_exists(&root, &format!(r"{classes}\{rel}"))?;
+    }
     write_background_rename(&root, classes, &executable, &icons)?;
     Ok(())
 }
@@ -571,15 +575,28 @@ fn write_com_keys_at(hive: winreg::HKEY, classes: &str, dll: &str) -> Result<()>
     let (inproc, _) = clsid.create_subkey("InProcServer32")?;
     inproc.set_value("", &dll)?;
     inproc.set_value("ThreadingModel", &"Apartment")?;
-    for progid in COM_PROGIDS {
+    for progid in COM_REGISTER_PROGIDS {
         let (key, _) = root.create_subkey(format!(
             r"{classes}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"
         ))?;
         key.set_value("", &SHELL_CLSID)?;
-        let _ = delete_if_exists(
+    }
+    for progid in COM_CLEANUP_PROGIDS {
+        if COM_REGISTER_PROGIDS.contains(progid) {
+            let _ = delete_if_exists(
+                &root,
+                &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\FastCopyRust"),
+            );
+            continue;
+        }
+        delete_if_exists(
+            &root,
+            &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+        )?;
+        delete_if_exists(
             &root,
             &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\FastCopyRust"),
-        );
+        )?;
     }
     if classes.eq_ignore_ascii_case(r"Software\Classes")
         || classes.eq_ignore_ascii_case(r"SOFTWARE\Classes")
@@ -617,10 +634,24 @@ fn delete_approved_value(hive: winreg::HKEY) -> Result<()> {
 }
 
 fn com_handler_ready(hive: winreg::HKEY, classes: &str) -> bool {
-    COM_PROGIDS.iter().all(|progid| {
+    COM_REGISTER_PROGIDS.iter().all(|progid| {
         hive_has(
             hive,
             &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+        )
+    }) && COM_CLEANUP_PROGIDS.iter().all(|progid| {
+        if COM_REGISTER_PROGIDS.contains(progid) {
+            return !hive_has(
+                hive,
+                &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\FastCopyRust"),
+            );
+        }
+        !hive_has(
+            hive,
+            &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
+        ) && !hive_has(
+            hive,
+            &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\FastCopyRust"),
         )
     }) && com_dll_path_matches(hive, classes)
 }
@@ -640,21 +671,18 @@ fn com_dll_path_matches(hive: winreg::HKEY, classes: &str) -> bool {
 
 fn delete_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
     let root = RegKey::predef(hive);
+    for rel in VISIBLE_CASCADES {
+        delete_if_exists(&root, &format!(r"{classes}\{rel}"))?;
+    }
     for rel in [
-        r"*\shell\FastCopyRust",
-        r"Directory\shell\FastCopyRust",
-        r"Directory\shell\FastCopyCut",
-        r"Directory\shell\FastCopyCopy",
-        r"Directory\shell\FastCopyDelete",
-        r"Directory\shell\FastCopyPaste",
-        r"Directory\Background\shell\FastCopyRust",
         r"Directory\Background\shell\FastCopyPaste",
         r"Directory\Background\shell\FastCopyClear",
         BACKGROUND_RENAME_VERB,
     ] {
         delete_if_exists(&root, &format!(r"{classes}\{rel}"))?;
     }
-    for progid in COM_PROGIDS {
+    delete_if_exists(&root, &menu_store(classes))?;
+    for progid in COM_CLEANUP_PROGIDS {
         delete_if_exists(
             &root,
             &format!(r"{classes}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
@@ -669,8 +697,25 @@ fn delete_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
         || classes.eq_ignore_ascii_case(r"SOFTWARE\Classes")
     {
         delete_approved_value(hive)?;
+        delete_cached_handler(hive)?;
     }
     Ok(())
+}
+
+fn delete_cached_handler(hive: winreg::HKEY) -> Result<()> {
+    let path = if hive == HKEY_CURRENT_USER {
+        r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Cached"
+    } else {
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Cached"
+    };
+    let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(path, KEY_SET_VALUE) else {
+        return Ok(());
+    };
+    match key.delete_value(SHELL_CLSID) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn unregister() -> Result<()> {
@@ -694,38 +739,9 @@ pub fn unregister_user() -> Result<()> {
 }
 
 pub fn unregister_machine() -> Result<()> {
-    let root = RegKey::predef(HKEY_LOCAL_MACHINE);
-    for path in [
-        r"SOFTWARE\Classes\*\shell\FastCopyRust",
-        r"SOFTWARE\Classes\Directory\shell\FastCopyRust",
-        r"SOFTWARE\Classes\Directory\shell\FastCopyCut",
-        r"SOFTWARE\Classes\Directory\shell\FastCopyCopy",
-        r"SOFTWARE\Classes\Directory\shell\FastCopyDelete",
-        r"SOFTWARE\Classes\Directory\shell\FastCopyPaste",
-        r"SOFTWARE\Classes\Directory\Background\shell\FastCopyRust",
-        r"SOFTWARE\Classes\Directory\Background\shell\FastCopyPaste",
-        r"SOFTWARE\Classes\Directory\Background\shell\FastCopyClear",
-        r"SOFTWARE\Classes\Directory\Background\shell\FastCopyRename",
-    ] {
-        delete_if_exists(&root, path)?;
-    }
-    for progid in COM_PROGIDS {
-        delete_if_exists(
-            &root,
-            &format!(r"SOFTWARE\Classes\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}"),
-        )?;
-        delete_if_exists(
-            &root,
-            &format!(r"SOFTWARE\Classes\{progid}\shellex\ContextMenuHandlers\FastCopyRust"),
-        )?;
-    }
-    delete_if_exists(
-        &root,
-        &format!(r"SOFTWARE\Classes\CLSID\{SHELL_CLSID}"),
-    )?;
-    delete_approved_value(HKEY_LOCAL_MACHINE)?;
+    delete_cascade_keys(HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes")?;
     delete_command_store(
-        &root,
+        &RegKey::predef(HKEY_LOCAL_MACHINE),
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\CommandStore\shell",
     )?;
     Ok(())
@@ -736,14 +752,13 @@ fn delete_command_store(root: &RegKey, store: &str) -> Result<()> {
     else {
         return Ok(());
     };
-    for name in [
-        "FastCopy.Cut",
-        "FastCopy.Copy",
-        "FastCopy.Paste",
-        "FastCopy.PasteBackground",
-        "FastCopy.Delete",
-    ] {
-        match command_store.delete_subkey_all(name) {
+    let names: Vec<String> = command_store
+        .enum_keys()
+        .filter_map(|item| item.ok())
+        .filter(|name| name.to_ascii_lowercase().starts_with("fastcopy"))
+        .collect();
+    for name in names {
+        match command_store.delete_subkey_all(&name) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -983,115 +998,6 @@ fn notify_shell(folder: Option<&Path>) {
     }
 }
 
-fn create_cascade(
-    root: &RegKey,
-    parent: &str,
-    executable: &str,
-    icons: &Path,
-    with_rename: bool,
-) -> Result<()> {
-    let t = ui_strings();
-    let (key, _) = root.create_subkey(parent)?;
-    key.set_value("MUIVerb", &t.menu_cascade)?;
-    key.set_value("SubCommands", &"")?;
-    key.set_value("MultiSelectModel", &"Document")?;
-    key.set_value("Icon", &icon_value(&icons.join("app.ico")))?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_CUT}"),
-        t.menu_cut,
-        &format!("\"{executable}\" --shell-cut \"%1\""),
-        &icons.join("cut.ico"),
-    )?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_COPY}"),
-        t.menu_copy,
-        &format!("\"{executable}\" --shell-copy \"%1\""),
-        &icons.join("copy.ico"),
-    )?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_DELETE}"),
-        t.menu_delete,
-        &format!("\"{executable}\" --shell-delete \"%1\""),
-        &icons.join("delete.ico"),
-    )?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_SYMLINK}"),
-        t.menu_copy_symlink,
-        &format!("\"{executable}\" --shell-copy-symlink \"%1\""),
-        &icons.join("copy.ico"),
-    )?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_HARDLINK}"),
-        t.menu_copy_hardlink,
-        &format!("\"{executable}\" --shell-copy-hardlink \"%1\""),
-        &icons.join("copy.ico"),
-    )?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_OPEN_TARGET}"),
-        t.menu_open_target,
-        &format!("\"{executable}\" --shell-open-target \"%1\""),
-        &icons.join("app.ico"),
-    )?;
-    set_link_only_verb(root, &format!(r"{parent}\{CASCADE_OPEN_TARGET}"))?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_SHOW_SOURCE}"),
-        t.menu_show_source,
-        &format!("\"{executable}\" --shell-show-source \"%1\""),
-        &icons.join("app.ico"),
-    )?;
-    set_link_only_verb(root, &format!(r"{parent}\{CASCADE_SHOW_SOURCE}"))?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_SIZE}"),
-        t.menu_size,
-        &format!("\"{executable}\" --shell-size \"%1\""),
-        &icons.join("size.ico"),
-    )?;
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_COPY_PATHS}"),
-        t.menu_copy_paths,
-        &format!("\"{executable}\" --shell-copy-path \"%1\""),
-        &icons.join("path.ico"),
-    )?;
-    if with_rename {
-        upsert_user_verb(
-            root,
-            &format!(r"{parent}\{CASCADE_RENAME}"),
-            t.menu_rename,
-            &format!("\"{executable}\" --shell-rename \"%1\""),
-            &icons.join("rename.ico"),
-        )?;
-    } else {
-        delete_if_exists(root, &format!(r"{parent}\{CASCADE_RENAME}"))?;
-    }
-    let _ = delete_if_exists(root, &format!(r"{parent}\shell\6settings"));
-    upsert_user_verb(
-        root,
-        &format!(r"{parent}\{CASCADE_SETTINGS}"),
-        t.settings_title,
-        &format!("\"{executable}\" --settings"),
-        &icons.join("settings.ico"),
-    )?;
-    let settings_key = root.open_subkey_with_flags(
-        &format!(r"{parent}\{CASCADE_SETTINGS}"),
-        KEY_SET_VALUE,
-    )?;
-    settings_key.set_value("CommandFlags", &CASCADE_SEPARATOR_BEFORE)?;
-    // COM handler draws the same submenu. Leave the keys so it can read labels,
-    // but keep Explorer from showing this cascade as a second 快速复制.
-    key.set_value("LegacyDisable", &"")?;
-    key.set_value("ProgrammaticAccessOnly", &"")?;
-    Ok(())
-}
-
 fn write_background_rename(
     root: &RegKey,
     classes: &str,
@@ -1108,183 +1014,36 @@ fn write_background_rename(
     )
 }
 
-fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
-    hive_has(hive, &format!(r"{classes}\Directory\shell\FastCopyCopy"))
-        || hive_has(hive, &format!(r"{classes}\Directory\shell\FastCopyCut"))
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_COPY}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SYMLINK}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SYMLINK}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_CUT}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_COPY}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_DELETE}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SETTINGS}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SETTINGS}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SIZE}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SIZE}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_COPY_PATHS}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_COPY_PATHS}"),
-        )
-        || hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_RENAME}"),
-        )
-        || !hive_has(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_RENAME}"),
-        )
-        || !hive_has(hive, &format!(r"{classes}\{BACKGROUND_RENAME_VERB}"))
-        || hive_has(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\shell\6settings"),
-        )
-        || !verb_icon_ends_with(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SIZE}"),
-            "size.ico",
-        )
-        || !verb_icon_ends_with(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_COPY_PATHS}"),
-            "path.ico",
-        )
-        || !verb_icon_ends_with(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_RENAME}"),
-            "rename.ico",
-        )
-        || !verb_icon_ends_with(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SETTINGS}"),
-            "settings.ico",
-        )
-        || !verb_is_single(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
-        )
-        || !verb_is_single(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
-        )
-        || !verb_is_single(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
-        )
-        || !verb_is_single(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
-        )
-        || !verb_applies_to_links(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
-        )
-        || !verb_applies_to_links(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_SHOW_SOURCE}"),
-        )
-        || !verb_applies_to_links(
-            hive,
-            &format!(r"{classes}\*\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
-        )
-        || !verb_applies_to_links(
-            hive,
-            &format!(r"{classes}\Directory\shell\FastCopyRust\{CASCADE_OPEN_TARGET}"),
-        )
-        || !verb_is_document(hive, &format!(r"{classes}\Directory\shell\FastCopyRust"))
-        || !verb_is_document(hive, &format!(r"{classes}\*\shell\FastCopyRust"))
-        || !verb_is_hidden(hive, &format!(r"{classes}\Directory\shell\FastCopyRust"))
-        || !verb_is_hidden(hive, &format!(r"{classes}\*\shell\FastCopyRust"))
-        || !com_handler_ready(hive, classes)
+fn visible_cascade_present(hive: winreg::HKEY, classes: &str) -> bool {
+    VISIBLE_CASCADES
+        .iter()
+        .any(|rel| hive_has(hive, &format!(r"{classes}\{rel}")))
 }
 
+fn menu_labels_ready(hive: winreg::HKEY, classes: &str) -> bool {
+    let store = menu_store(classes);
+    hive_has(hive, &store)
+        && hive_has(hive, &format!(r"{store}\{CASCADE_CUT}"))
+        && hive_has(hive, &format!(r"{store}\{CASCADE_COPY}"))
+        && hive_has(hive, &format!(r"{store}\{CASCADE_OPEN_TARGET}"))
+        && hive_has(hive, &format!(r"{store}\{CASCADE_SHOW_SOURCE}"))
+        && hive_has(hive, &format!(r"{store}\{CASCADE_SETTINGS}"))
+        && hive_has(hive, &format!(r"{store}\{CASCADE_RENAME}"))
+}
+
+fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
+    visible_cascade_present(hive, classes)
+        || !com_handler_ready(hive, classes)
+        || !menu_labels_ready(hive, classes)
+}
+
+#[cfg(test)]
 fn verb_is_hidden(hive: winreg::HKEY, path: &str) -> bool {
     let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
         return false;
     };
     key.get_value::<String, _>("LegacyDisable").is_ok()
         && key.get_value::<String, _>("ProgrammaticAccessOnly").is_ok()
-}
-
-fn verb_icon_ends_with(hive: winreg::HKEY, path: &str, suffix: &str) -> bool {
-    let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
-        return false;
-    };
-    let icon: String = key.get_value("Icon").unwrap_or_default();
-    icon.to_ascii_lowercase()
-        .ends_with(&suffix.to_ascii_lowercase())
-}
-
-fn verb_is_document(hive: winreg::HKEY, path: &str) -> bool {
-    verb_multi_select_model(hive, path) == "Document"
-}
-
-fn verb_is_single(hive: winreg::HKEY, path: &str) -> bool {
-    verb_multi_select_model(hive, path) == "Single"
-}
-
-fn verb_multi_select_model(hive: winreg::HKEY, path: &str) -> String {
-    let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
-        return String::new();
-    };
-    key.get_value("MultiSelectModel").unwrap_or_default()
-}
-
-fn verb_applies_to_links(hive: winreg::HKEY, path: &str) -> bool {
-    let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
-        return false;
-    };
-    let applies: String = key.get_value("AppliesTo").unwrap_or_default();
-    applies == LINK_APPLIES_TO
 }
 
 fn repair_cascade_menu(hive: winreg::HKEY, classes: &str) -> Result<()> {
@@ -1326,32 +1085,6 @@ fn ui_strings() -> &'static crate::i18n::Strings {
             .map(|settings| settings.language)
             .unwrap_or_default(),
     )
-}
-
-fn upsert_user_verb(
-    root: &RegKey,
-    path: &str,
-    label: &str,
-    command: &str,
-    icon: &Path,
-) -> Result<()> {
-    let (key, _) = root.create_subkey(path)?;
-    key.set_value("MUIVerb", &label)?;
-    key.set_value("Icon", &icon_value(icon))?;
-    key.set_value("MultiSelectModel", &"Document")?;
-    delete_value_if_exists(&key, "LegacyDisable")?;
-    delete_value_if_exists(&key, "ProgrammaticAccessOnly")?;
-    delete_value_if_exists(&key, "AppliesTo")?;
-    let (command_key, _) = key.create_subkey("command")?;
-    command_key.set_value("", &command)?;
-    Ok(())
-}
-
-fn set_link_only_verb(root: &RegKey, path: &str) -> Result<()> {
-    let key = root.open_subkey_with_flags(path, KEY_SET_VALUE)?;
-    key.set_value("MultiSelectModel", &"Single")?;
-    key.set_value("AppliesTo", &LINK_APPLIES_TO)?;
-    Ok(())
 }
 
 fn upsert_background_verb(
@@ -1525,8 +1258,18 @@ mod tests {
         let dll = shell_dll_path().expect("shell dll path");
         assert!(dll.is_file(), "missing {}", dll.display());
         write_com_keys_at(HKEY_CURRENT_USER, TEST_CLASSES, &dll.to_string_lossy()).unwrap();
-        for progid in COM_PROGIDS {
+        let store = menu_store(TEST_CLASSES);
+        for progid in COM_REGISTER_PROGIDS {
             assert!(hive_has(
+                HKEY_CURRENT_USER,
+                &format!(r"{TEST_CLASSES}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}")
+            ));
+        }
+        for progid in COM_CLEANUP_PROGIDS {
+            if COM_REGISTER_PROGIDS.contains(progid) {
+                continue;
+            }
+            assert!(!hive_has(
                 HKEY_CURRENT_USER,
                 &format!(r"{TEST_CLASSES}\{progid}\shellex\ContextMenuHandlers\{SHELL_HANDLER}")
             ));
@@ -1541,52 +1284,23 @@ mod tests {
             .get_value("ThreadingModel")
             .unwrap();
         assert_eq!(model_thread, "Apartment");
-        assert!(hive_has(HKEY_CURRENT_USER, &file_key));
+        assert!(!hive_has(HKEY_CURRENT_USER, &file_key));
+        assert!(!hive_has(HKEY_CURRENT_USER, &dir_key));
+        let cascade_label: String = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(&store)
+            .unwrap()
+            .get_value("MUIVerb")
+            .unwrap();
+        assert!(!cascade_label.is_empty());
         assert!(hive_has(
             HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_CUT}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_COPY}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_DELETE}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_SYMLINK}")
+            &format!(r"{store}\{CASCADE_OPEN_TARGET}")
         ));
         assert!(hive_has(
             HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_HARDLINK}")
+            &format!(r"{store}\{CASCADE_SHOW_SOURCE}")
         ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_OPEN_TARGET}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_SHOW_SOURCE}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_SIZE}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_COPY_PATHS}")
-        ));
-        assert!(!hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_RENAME}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{dir_key}\{CASCADE_RENAME}")
-        ));
-        let rename_key = format!(r"{dir_key}\{CASCADE_RENAME}");
+        let rename_key = format!(r"{store}\{CASCADE_RENAME}");
         let background_rename = format!(r"{TEST_CLASSES}\{BACKGROUND_RENAME_VERB}");
         assert!(apply_rename_menu(HKEY_CURRENT_USER, TEST_CLASSES, false).unwrap());
         assert!(verb_is_hidden(HKEY_CURRENT_USER, &rename_key));
@@ -1595,74 +1309,38 @@ mod tests {
         assert!(!verb_is_hidden(HKEY_CURRENT_USER, &rename_key));
         assert!(!verb_is_hidden(HKEY_CURRENT_USER, &background_rename));
         assert!(!apply_rename_menu(HKEY_CURRENT_USER, TEST_CLASSES, true).unwrap());
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{TEST_CLASSES}\{BACKGROUND_RENAME_VERB}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{dir_key}\{CASCADE_SHOW_SOURCE}")
-        ));
-        let show_key = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey(format!(r"{file_key}\{CASCADE_SHOW_SOURCE}"))
-            .unwrap();
-        let show_model: String = show_key.get_value("MultiSelectModel").unwrap();
-        assert_eq!(show_model, "Single");
-        let applies: String = show_key.get_value("AppliesTo").unwrap();
-        assert_eq!(applies, LINK_APPLIES_TO);
-        let dir_show: String = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey(format!(r"{dir_key}\{CASCADE_SHOW_SOURCE}"))
-            .unwrap()
-            .get_value("MultiSelectModel")
-            .unwrap();
-        assert_eq!(dir_show, "Single");
-        let open_key = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey(format!(r"{file_key}\{CASCADE_OPEN_TARGET}"))
-            .unwrap();
-        let open_model: String = open_key.get_value("MultiSelectModel").unwrap();
-        assert_eq!(open_model, "Single");
-        let open_applies: String = open_key.get_value("AppliesTo").unwrap();
-        assert_eq!(open_applies, LINK_APPLIES_TO);
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{file_key}\{CASCADE_SETTINGS}")
-        ));
-        assert!(hive_has(HKEY_CURRENT_USER, &dir_key));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{dir_key}\{CASCADE_COPY}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{dir_key}\{CASCADE_SYMLINK}")
-        ));
-        assert!(hive_has(
-            HKEY_CURRENT_USER,
-            &format!(r"{dir_key}\{CASCADE_SETTINGS}")
-        ));
-        let model: String = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey(&dir_key)
-            .unwrap()
-            .get_value("MultiSelectModel")
-            .unwrap();
-        assert_eq!(model, "Document");
-        let file_model: String = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey(&file_key)
-            .unwrap()
-            .get_value("MultiSelectModel")
-            .unwrap();
-        assert_eq!(file_model, "Document");
-        assert!(verb_is_hidden(HKEY_CURRENT_USER, &file_key));
-        assert!(verb_is_hidden(HKEY_CURRENT_USER, &dir_key));
+        assert!(hive_has(HKEY_CURRENT_USER, &background_rename));
         assert!(!menu_needs_repair(HKEY_CURRENT_USER, TEST_CLASSES));
-        let dir = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey_with_flags(&dir_key, KEY_SET_VALUE)
+        let (legacy, _) = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(&file_key)
             .unwrap();
-        dir.set_value("MultiSelectModel", &"Single").unwrap();
+        legacy.set_value("MUIVerb", &"快速复制").unwrap();
+        legacy.set_value("SubCommands", &"").unwrap();
+        let extra_handler =
+            format!(r"{TEST_CLASSES}\*\shellex\ContextMenuHandlers\{SHELL_HANDLER}");
+        let (extra, _) = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(&extra_handler)
+            .unwrap();
+        extra.set_value("", &SHELL_CLSID).unwrap();
+        let dir_handler =
+            format!(r"{TEST_CLASSES}\Directory\shellex\ContextMenuHandlers\{SHELL_HANDLER}");
+        let (dir_extra, _) = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(&dir_handler)
+            .unwrap();
+        dir_extra.set_value("", &SHELL_CLSID).unwrap();
         assert!(menu_needs_repair(HKEY_CURRENT_USER, TEST_CLASSES));
         delete_cascade_keys(HKEY_CURRENT_USER, TEST_CLASSES).unwrap();
         assert!(!hive_has(HKEY_CURRENT_USER, &file_key));
         assert!(!hive_has(HKEY_CURRENT_USER, &dir_key));
+        assert!(!hive_has(HKEY_CURRENT_USER, &extra_handler));
+        assert!(!hive_has(HKEY_CURRENT_USER, &dir_handler));
+        assert!(!hive_has(
+            HKEY_CURRENT_USER,
+            &format!(
+                r"{TEST_CLASSES}\AllFilesystemObjects\shellex\ContextMenuHandlers\{SHELL_HANDLER}"
+            )
+        ));
+        assert!(!hive_has(HKEY_CURRENT_USER, &store));
         assert!(!hive_has(
             HKEY_CURRENT_USER,
             &format!(r"{TEST_CLASSES}\CLSID\{SHELL_CLSID}")

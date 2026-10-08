@@ -14,7 +14,7 @@
 #pragma comment(lib, "uuid.lib")
 
 enum { BMP_APP = 0, BMP_CUT, BMP_COPY, BMP_DELETE, BMP_SIZE, BMP_PATH, BMP_RENAME, BMP_SETTINGS, BMP_COUNT };
-enum { CMD_CUT = 0, CMD_COPY, CMD_DELETE, CMD_SYMLINK, CMD_HARDLINK, CMD_SIZE, CMD_COPYPATH, CMD_RENAME, CMD_SETTINGS, CMD_COUNT };
+enum { CMD_CUT = 0, CMD_COPY, CMD_DELETE, CMD_SYMLINK, CMD_HARDLINK, CMD_OPEN, CMD_SHOW, CMD_SIZE, CMD_COPYPATH, CMD_RENAME, CMD_SETTINGS, CMD_COUNT };
 
 static const GUID CLSID_FastCopyMenu = {0xB3E8D47A, 0x6C1F, 0x4A92, {0x9E, 0x05, 0x8F, 0x4C, 0x2B, 0x17, 0xA6, 0xD0}};
 static const WCHAR kCascadeZh[] = {0x5FEB, 0x901F, 0x590D, 0x5236, 0};
@@ -41,6 +41,7 @@ static HRESULT launch(struct Handler *h, UINT id);
 static int exe_path(WCHAR *out, UINT cap);
 static int menu_has_cascade(HMENU menu);
 static int rename_menu_enabled(void);
+static int is_single_link(struct Handler *h);
 static void read_label(const WCHAR *sub, WCHAR *out, UINT cap, const WCHAR *fallback);
 static HBITMAP load_icon_bitmap(const WCHAR *name);
 static void insert_cmd(HMENU sub, UINT pos, UINT id, const WCHAR *subkey, const WCHAR *fallback, HBITMAP bmp);
@@ -77,21 +78,24 @@ static HRESULT STDMETHODCALLTYPE Menu_QueryContextMenu(IContextMenu *this, HMENU
 	h->bmp[BMP_SETTINGS] = load_icon_bitmap(L"settings.ico");
 	sub = CreatePopupMenu();
 	if(!sub) return E_OUTOFMEMORY;
-	insert_cmd(sub, 0, idCmdFirst + CMD_CUT, L"shell\\1cut", L"Quick Cut", h->bmp[BMP_CUT]);
-	insert_cmd(sub, 1, idCmdFirst + CMD_COPY, L"shell\\2copy", L"Quick Copy", h->bmp[BMP_COPY]);
-	insert_cmd(sub, 2, idCmdFirst + CMD_DELETE, L"shell\\3delete", L"Quick Delete", h->bmp[BMP_DELETE]);
-	insert_cmd(sub, 3, idCmdFirst + CMD_SYMLINK, L"shell\\4symlink", L"Copy as symbolic link", h->bmp[BMP_COPY]);
-	insert_cmd(sub, 4, idCmdFirst + CMD_HARDLINK, L"shell\\5hardlink", L"Copy as hard link", h->bmp[BMP_COPY]);
-	insert_cmd(sub, 5, idCmdFirst + CMD_SIZE, L"shell\\7size", L"Folder size", h->bmp[BMP_SIZE]);
-	insert_cmd(sub, 6, idCmdFirst + CMD_COPYPATH, L"shell\\8copypath", L"Copy paths", h->bmp[BMP_PATH]);
-	if(h->is_folder && rename_menu_enabled()){
-		insert_cmd(sub, 7, idCmdFirst + CMD_RENAME, L"shell\\9rename", L"Batch rename", h->bmp[BMP_RENAME]);
-		InsertMenuW(sub, 8, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
-		insert_cmd(sub, 9, idCmdFirst + CMD_SETTINGS, L"shell\\zsettings", L"Settings", h->bmp[BMP_SETTINGS]);
-	}
-	else {
-		InsertMenuW(sub, 7, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
-		insert_cmd(sub, 8, idCmdFirst + CMD_SETTINGS, L"shell\\zsettings", L"Settings", h->bmp[BMP_SETTINGS]);
+	{
+		UINT pos = 0;
+		insert_cmd(sub, pos++, idCmdFirst + CMD_CUT, L"shell\\1cut", L"Quick Cut", h->bmp[BMP_CUT]);
+		insert_cmd(sub, pos++, idCmdFirst + CMD_COPY, L"shell\\2copy", L"Quick Copy", h->bmp[BMP_COPY]);
+		insert_cmd(sub, pos++, idCmdFirst + CMD_DELETE, L"shell\\3delete", L"Quick Delete", h->bmp[BMP_DELETE]);
+		insert_cmd(sub, pos++, idCmdFirst + CMD_SYMLINK, L"shell\\4symlink", L"Copy as symbolic link", h->bmp[BMP_COPY]);
+		insert_cmd(sub, pos++, idCmdFirst + CMD_HARDLINK, L"shell\\5hardlink", L"Copy as hard link", h->bmp[BMP_COPY]);
+		if(is_single_link(h)){
+			insert_cmd(sub, pos++, idCmdFirst + CMD_OPEN, L"shell\\6open", L"Open link target", h->bmp[BMP_APP]);
+			insert_cmd(sub, pos++, idCmdFirst + CMD_SHOW, L"shell\\6path", L"View source path", h->bmp[BMP_APP]);
+		}
+		insert_cmd(sub, pos++, idCmdFirst + CMD_SIZE, L"shell\\7size", L"Folder size", h->bmp[BMP_SIZE]);
+		insert_cmd(sub, pos++, idCmdFirst + CMD_COPYPATH, L"shell\\8copypath", L"Copy paths", h->bmp[BMP_PATH]);
+		if(h->is_folder && rename_menu_enabled()){
+			insert_cmd(sub, pos++, idCmdFirst + CMD_RENAME, L"shell\\9rename", L"Batch rename", h->bmp[BMP_RENAME]);
+		}
+		InsertMenuW(sub, pos++, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+		insert_cmd(sub, pos++, idCmdFirst + CMD_SETTINGS, L"shell\\zsettings", L"Settings", h->bmp[BMP_SETTINGS]);
 	}
 	read_label(L"", label, 256, L"FastCopy");
 	{
@@ -328,6 +332,8 @@ static HRESULT launch(struct Handler *h, UINT id){
 	case CMD_DELETE: flag = L"--shell-delete"; break;
 	case CMD_SYMLINK: flag = L"--shell-copy-symlink"; break;
 	case CMD_HARDLINK: flag = L"--shell-copy-hardlink"; break;
+	case CMD_OPEN: flag = L"--shell-open-target"; break;
+	case CMD_SHOW: flag = L"--shell-show-source"; break;
 	case CMD_SIZE: flag = L"--shell-size"; break;
 	case CMD_COPYPATH: flag = L"--shell-copy-path"; break;
 	case CMD_RENAME: flag = L"--shell-rename"; break;
@@ -386,23 +392,54 @@ static int reg_has_legacy_disable(HKEY hive, const WCHAR *path){
 	return 0;
 }
 
+static int reg_mui(HKEY hive, const WCHAR *path, WCHAR *out, UINT cap){
+	HKEY key;
+	DWORD n, type;
+	if(RegOpenKeyExW(hive, path, 0, KEY_READ, &key) != 0) return 0;
+	n = cap * sizeof(WCHAR);
+	if(RegQueryValueExW(key, L"MUIVerb", NULL, &type, (BYTE *)out, &n) != 0 || type != REG_SZ) out[0] = 0;
+	RegCloseKey(key);
+	return out[0] != 0;
+}
+
 static int rename_menu_enabled(void){
-	int user = reg_has_legacy_disable(HKEY_CURRENT_USER, L"Software\\Classes\\Directory\\shell\\FastCopyRust\\shell\\9rename");
+	int user = reg_has_legacy_disable(HKEY_CURRENT_USER, L"Software\\FastCopyMenu\\shell\\9rename");
 	int machine;
+	if(user >= 0) return user == 0;
+	machine = reg_has_legacy_disable(HKEY_LOCAL_MACHINE, L"SOFTWARE\\FastCopyMenu\\shell\\9rename");
+	if(machine >= 0) return machine == 0;
+	user = reg_has_legacy_disable(HKEY_CURRENT_USER, L"Software\\Classes\\Directory\\shell\\FastCopyRust\\shell\\9rename");
 	if(user >= 0) return user == 0;
 	machine = reg_has_legacy_disable(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\Directory\\shell\\FastCopyRust\\shell\\9rename");
 	if(machine >= 0) return machine == 0;
 	return 0;
 }
 
+static int is_single_link(struct Handler *h){
+	const WCHAR *dot;
+	DWORD attr;
+	if(h->nfiles != 1 || !h->first[0]) return 0;
+	dot = wcsrchr(h->first, L'.');
+	if(dot && !lstrcmpiW(dot, L".lnk")) return 1;
+	attr = GetFileAttributesW(h->first);
+	return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
 static int menu_has_cascade(HMENU menu){
 	WCHAR want[256];
 	WCHAR text[512];
+	MENUITEMINFOW info;
 	int n, i;
 	read_label(L"", want, 256, L"FastCopy");
 	n = GetMenuItemCount(menu);
 	for(i = 0; i < n; i++){
-		if(GetMenuStringW(menu, (UINT)i, text, 512, MF_BYPOSITION) <= 0) continue;
+		text[0] = 0;
+		memset(&info, 0, sizeof(info));
+		info.cbSize = sizeof(info);
+		info.fMask = MIIM_STRING | MIIM_SUBMENU;
+		info.dwTypeData = text;
+		info.cch = 511;
+		if(!GetMenuItemInfoW(menu, (UINT)i, TRUE, &info) || !text[0]) continue;
 		strip_amp(text);
 		if(!lstrcmpiW(text, want) || !lstrcmpiW(text, L"FastCopy") || !lstrcmpiW(text, kCascadeZh)) return 1;
 	}
@@ -410,26 +447,30 @@ static int menu_has_cascade(HMENU menu){
 }
 
 static void read_label(const WCHAR *sub, WCHAR *out, UINT cap, const WCHAR *fallback){
-	HKEY key;
 	WCHAR path[512];
-	DWORD n, type;
 	out[0] = 0;
 	if(sub && sub[0]){
-		if(FAILED(StringCchPrintfW(path, 512, L"Software\\Classes\\*\\shell\\FastCopyRust\\%s", sub))){
+		if(FAILED(StringCchPrintfW(path, 512, L"Software\\FastCopyMenu\\%s", sub))){
 			lstrcpynW(out, fallback, (int)cap);
 			return;
 		}
 	}
-	else StringCchCopyW(path, 512, L"Software\\Classes\\*\\shell\\FastCopyRust");
-	if(RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ, &key) == 0){
-		n = cap * sizeof(WCHAR);
-		if(RegQueryValueExW(key, L"MUIVerb", NULL, &type, (BYTE *)out, &n) != 0 || type != REG_SZ) out[0] = 0;
-		RegCloseKey(key);
+	else StringCchCopyW(path, 512, L"Software\\FastCopyMenu");
+	if(!reg_mui(HKEY_CURRENT_USER, path, out, cap) && sub && sub[0]){
+		if(SUCCEEDED(StringCchPrintfW(path, 512, L"SOFTWARE\\FastCopyMenu\\%s", sub))) reg_mui(HKEY_LOCAL_MACHINE, path, out, cap);
 	}
-	if(!out[0] && RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\*\\shell\\FastCopyRust", 0, KEY_READ, &key) == 0 && (!sub || !sub[0])){
-		n = cap * sizeof(WCHAR);
-		if(RegQueryValueExW(key, L"MUIVerb", NULL, &type, (BYTE *)out, &n) != 0 || type != REG_SZ) out[0] = 0;
-		RegCloseKey(key);
+	else if(!out[0]) reg_mui(HKEY_LOCAL_MACHINE, L"SOFTWARE\\FastCopyMenu", out, cap);
+	if(!out[0]){
+		if(sub && sub[0]){
+			if(FAILED(StringCchPrintfW(path, 512, L"Software\\Classes\\*\\shell\\FastCopyRust\\%s", sub))){
+				lstrcpynW(out, fallback, (int)cap);
+				return;
+			}
+		}
+		else StringCchCopyW(path, 512, L"Software\\Classes\\*\\shell\\FastCopyRust");
+		if(!reg_mui(HKEY_CURRENT_USER, path, out, cap) && (!sub || !sub[0])){
+			reg_mui(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\*\\shell\\FastCopyRust", out, cap);
+		}
 	}
 	if(!out[0]) lstrcpynW(out, fallback, (int)cap);
 }

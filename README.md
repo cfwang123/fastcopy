@@ -23,7 +23,7 @@ After that, Explorer shows a **FastCopy** submenu on selected files and folders,
 
 ## Selected files and folders
 
-Right-click one or more files, folders, or a mix. Commands are under the **FastCopy** submenu, shown once. The shell extension draws that submenu, including when more than 100 items are selected (Explorer hides ordinary registry verbs after that). The app reads the current Explorer selection so the command covers the whole selection. After replacing `fastcopy_shell.dll`, restart Explorer so the new DLL is loaded.
+Right-click one or more files, folders, or a mix. Commands are under the **FastCopy** submenu, shown once. The shell extension draws that submenu, including when more than 100 items are selected (Explorer hides ordinary registry verbs after that). The app reads the current Explorer selection so the command covers the whole selection. Unregister removes the shell extension and any leftover registry cascade together. After replacing `fastcopy_shell.dll`, restart Explorer so the new DLL is loaded.
 
 - **Quick Cut** — Put the selection on FastCopy’s own clipboard (not the Windows text clipboard). Paste later on a folder background to move.
 - **Quick Copy** — Same clipboard, paste later to copy.
@@ -69,7 +69,7 @@ Settings are stored in `%LOCALAPPDATA%\FastCopy\settings.json`.
 
 ## Register and language
 
-An older all-users install can still be removed with **Unregister all-users menu (admin)**. Unregister from the Settings page. Register and unregister refresh the menu status automatically. New menu items and icons from an upgrade are repaired on the next launch.
+An older all-users install can still be removed with **Unregister all-users menu (admin)**. Unregister from the Settings page. Both the current-user and all-users unregister remove the cascade and the shell extension, so a second FastCopy item is not left behind. Register and unregister refresh the menu status automatically. New menu items and icons from an upgrade are repaired on the next launch.
 
 Paste/Cancel on a folder background follow the UI language immediately. The FastCopy submenu labels update when the language is changed.
 
