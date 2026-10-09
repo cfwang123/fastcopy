@@ -8,6 +8,8 @@ src = sys.argv[1]
 dst = sys.argv[2]
 initial_mtime_ms = int(sys.argv[3])
 marker = os.path.normcase(os.path.dirname(src))
+# target/ may be a junction, so rustc's command line can spell the output path differently.
+crate_arg = "--crate-name " + os.path.splitext(os.path.basename(src))[0].replace("-", "_") + " "
 
 
 def mtime_ms(path):
@@ -93,7 +95,7 @@ def our_compiler_running():
         return False
     mark = marker.replace("/", "\\")
     for line in r.stdout.splitlines():
-        if mark in os.path.normcase(line.replace("/", "\\")):
+        if mark in os.path.normcase(line.replace("/", "\\")) or crate_arg in line:
             return True
     return False
 
