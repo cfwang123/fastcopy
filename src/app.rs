@@ -4,12 +4,14 @@ use crate::model::{
     TaskRequest,
 };
 use crate::tools::{self, SizeStats};
+use crate::updater::{self, DownloadProgress, UpdateInfo};
 use crate::windows::shell_menu::{self, InstanceGuard, PendingCommand};
 use eframe::egui;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,6 +51,24 @@ struct LastResult {
     cancelled: bool,
 }
 
+enum UpdateJob {
+    Idle,
+    Checking {
+        silent: bool,
+        receiver: Receiver<anyhow::Result<UpdateInfo>>,
+    },
+    Downloading {
+        progress: Arc<DownloadProgress>,
+        cancel: Arc<AtomicBool>,
+        receiver: Receiver<anyhow::Result<PathBuf>>,
+    },
+}
+
+enum UpdateOutcome {
+    Checked(anyhow::Result<UpdateInfo>, bool),
+    Downloaded(anyhow::Result<PathBuf>),
+}
+
 pub struct FastCopyApp {
     settings: Settings,
     active: Option<ActiveTask>,
@@ -60,6 +80,7 @@ pub struct FastCopyApp {
     last_pending_check: Instant,
     last_mode: Option<UiMode>,
     close_after_task: bool,
+    update_job: UpdateJob,
     _instance_guard: InstanceGuard,
 }
 
@@ -79,12 +100,149 @@ impl FastCopyApp {
             last_pending_check: Instant::now() - Duration::from_secs(1),
             last_mode: None,
             close_after_task: false,
+            update_job: UpdateJob::Idle,
             _instance_guard: instance_guard,
         };
         shell_menu::refresh_background_verbs();
+        updater::remove_stale_files();
         app.collect_pending_commands();
         app.start_next_task();
+        if app.ui_mode() == UiMode::Settings
+            && app.settings.update_check_due(updater::now_secs())
+        {
+            app.start_update_check(true);
+        }
         app
+    }
+
+    fn prefer_update_mirrors(&self) -> bool {
+        self.settings.language == Language::Zh
+    }
+
+    fn start_update_check(&mut self, silent: bool) {
+        let (sender, receiver) = mpsc::channel();
+        let t = self.t();
+        let prefer_mirrors = self.prefer_update_mirrors();
+        thread::spawn(move || {
+            let _ = sender.send(updater::check_latest(t, prefer_mirrors));
+        });
+        self.update_job = UpdateJob::Checking { silent, receiver };
+    }
+
+    fn start_update_download(&mut self, info: UpdateInfo) {
+        let progress = Arc::new(DownloadProgress::default());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel();
+        let prefer_mirrors = self.prefer_update_mirrors();
+        let worker_progress = progress.clone();
+        let worker_cancel = cancel.clone();
+        thread::spawn(move || {
+            let result = updater::download(&info, prefer_mirrors, &worker_progress, &worker_cancel);
+            let _ = sender.send(result);
+        });
+        self.update_job = UpdateJob::Downloading {
+            progress,
+            cancel,
+            receiver,
+        };
+    }
+
+    /// Only the timestamp goes to disk, so unsaved edits on the settings page stay unsaved.
+    fn mark_update_checked(&mut self) {
+        let now = updater::now_secs();
+        self.settings.last_update_check = now;
+        let mut stored = load_settings();
+        stored.last_update_check = now;
+        let _ = save_settings(&stored);
+    }
+
+    fn poll_update(&mut self) {
+        let outcome = match &self.update_job {
+            UpdateJob::Idle => return,
+            UpdateJob::Checking { silent, receiver } => match receiver.try_recv() {
+                Ok(result) => UpdateOutcome::Checked(result, *silent),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    UpdateOutcome::Checked(Err(anyhow::anyhow!("update check stopped")), *silent)
+                }
+            },
+            UpdateJob::Downloading { receiver, .. } => match receiver.try_recv() {
+                Ok(result) => UpdateOutcome::Downloaded(result),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    UpdateOutcome::Downloaded(Err(anyhow::anyhow!("download stopped")))
+                }
+            },
+        };
+        self.update_job = UpdateJob::Idle;
+        let t = self.t();
+        match outcome {
+            UpdateOutcome::Checked(Ok(info), silent) => {
+                self.mark_update_checked();
+                if info.has_update {
+                    let question =
+                        t.update_found(&info.current, &info.version, &info.asset_name, info.size);
+                    if ask_yes_no(t.check_update, &question, rfd::MessageLevel::Info) {
+                        self.settings_status.clear();
+                        self.start_update_download(info);
+                    }
+                } else if !silent {
+                    let _ = rfd::MessageDialog::new()
+                        .set_title(t.check_update)
+                        .set_description(t.update_latest(&info.current, &info.version))
+                        .set_level(rfd::MessageLevel::Info)
+                        .show();
+                }
+            }
+            UpdateOutcome::Checked(Err(error), silent) => {
+                if !silent {
+                    offer_release_page(t, &error);
+                }
+            }
+            UpdateOutcome::Downloaded(Ok(archive)) => {
+                let _ = save_settings(&self.settings);
+                if let Err(error) = updater::launch_updater_and_exit(&archive) {
+                    offer_release_page(t, &error);
+                }
+            }
+            UpdateOutcome::Downloaded(Err(error)) if error.is::<updater::Cancelled>() => {
+                self.settings_status = t.update_cancelled.to_owned();
+            }
+            UpdateOutcome::Downloaded(Err(error)) => offer_release_page(t, &error),
+        }
+    }
+
+    fn show_update_controls(&mut self, ui: &mut egui::Ui) {
+        let t = self.t();
+        let mut start_check = false;
+        match &self.update_job {
+            UpdateJob::Idle => start_check = ui.button(t.check_update).clicked(),
+            UpdateJob::Checking { silent: false, .. } => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(t.update_checking);
+                });
+            }
+            UpdateJob::Checking { .. } => {
+                ui.add_enabled(false, egui::Button::new(t.check_update));
+            }
+            UpdateJob::Downloading {
+                progress, cancel, ..
+            } => {
+                let done = progress.done.load(Ordering::Relaxed);
+                let total = progress.total.load(Ordering::Relaxed);
+                ui.label(t.update_downloading(done, total));
+                if total > 0 {
+                    ui.add(egui::ProgressBar::new(done as f32 / total as f32));
+                }
+                if ui.button(t.update_cancel).clicked() {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        if start_check {
+            self.start_update_check(false);
+        }
     }
 
     fn refresh_shell_status(&mut self) {
@@ -679,6 +837,15 @@ impl FastCopyApp {
             });
         ui.checkbox(&mut self.settings.notify_on_finish, t.notify_on_finish);
         ui.separator();
+        ui.label(t.current_version(updater::current_version()));
+        ui.label(t.update_check_days);
+        ui.add(
+            egui::Slider::new(&mut self.settings.update_check_days, 0..=90)
+                .suffix(t.days_suffix)
+                .clamping(egui::SliderClamping::Always),
+        );
+        self.show_update_controls(ui);
+        ui.separator();
         ui.label(t.shell_status(self.shell_user, self.shell_machine));
         ui.horizontal_wrapped(|ui| {
             if !self.shell_user && !self.shell_machine && ui.button(t.register).clicked() {
@@ -740,6 +907,7 @@ impl eframe::App for FastCopyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         self.process_engine_events();
+        self.poll_update();
         self.sample_copy_rate();
         if self.last_pending_check.elapsed() >= Duration::from_millis(300) {
             self.last_pending_check = Instant::now();
@@ -1148,6 +1316,27 @@ fn show_error(strings: &crate::i18n::Strings, message: String) {
         .set_description(&message)
         .set_level(rfd::MessageLevel::Error)
         .show();
+}
+
+fn ask_yes_no(title: &str, message: &str, level: rfd::MessageLevel) -> bool {
+    matches!(
+        rfd::MessageDialog::new()
+            .set_title(title)
+            .set_description(message)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .set_level(level)
+            .show(),
+        rfd::MessageDialogResult::Yes
+    )
+}
+
+fn offer_release_page(strings: &crate::i18n::Strings, error: &anyhow::Error) {
+    let message = strings.update_failed(&format!("{error:#}"));
+    if ask_yes_no(strings.check_update, &message, rfd::MessageLevel::Warning) {
+        let _ = std::process::Command::new("explorer.exe")
+            .arg(updater::REPO_PAGE)
+            .spawn();
+    }
 }
 
 pub(crate) fn confirm_permanent_delete(strings: &crate::i18n::Strings, paths: &[PathBuf]) -> bool {

@@ -7,6 +7,7 @@ mod i18n;
 mod model;
 mod notify;
 mod tools;
+mod updater;
 mod windows;
 
 use anyhow::{Result, anyhow};
@@ -56,6 +57,7 @@ fn run() -> Result<i32> {
         shell_menu::heal_legacy_menu();
     }
     match arguments.get(1).map(String::as_str) {
+        Some("--apply-update") => return updater::run_apply_update(&arguments, t),
         Some("--copy") | Some("--move") => {
             let kind = if arguments[1] == "--move" {
                 OperationKind::Move

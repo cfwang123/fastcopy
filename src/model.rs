@@ -55,6 +55,8 @@ pub struct Settings {
     pub language: Language,
     #[serde(default = "default_true")]
     pub notify_on_finish: bool,
+    pub update_check_days: u32,
+    pub last_update_check: u64,
 }
 
 impl Default for Settings {
@@ -72,6 +74,8 @@ impl Default for Settings {
             delete_mode: DeleteMode::RecycleBin,
             language: Language::default(),
             notify_on_finish: true,
+            update_check_days: 7,
+            last_update_check: 0,
         }
     }
 }
@@ -85,6 +89,11 @@ impl OperationKind {
 impl Settings {
     pub fn notify_when_done(&self, kind: OperationKind) -> bool {
         !kind.is_link_paste() && self.notify_on_finish
+    }
+
+    pub fn update_check_due(&self, now: u64) -> bool {
+        self.update_check_days > 0
+            && now.saturating_sub(self.last_update_check) >= u64::from(self.update_check_days) * 86_400
     }
 }
 
@@ -149,6 +158,11 @@ mod tests {
         assert!(settings.notify_when_done(OperationKind::Copy));
         assert!(!settings.notify_when_done(OperationKind::CopyAsSymlink));
         assert!(!settings.notify_when_done(OperationKind::CopyAsHardlink));
+        settings.last_update_check = 1_000_000;
+        assert!(!settings.update_check_due(1_000_000 + 86_400));
+        assert!(settings.update_check_due(1_000_000 + 7 * 86_400));
+        settings.update_check_days = 0;
+        assert!(!settings.update_check_due(u64::MAX));
         settings.notify_on_finish = false;
         assert!(!settings.notify_when_done(OperationKind::Move));
         assert!(!settings.notify_when_done(OperationKind::CopyAsHardlink));
@@ -158,5 +172,7 @@ mod tests {
     fn missing_notify_fields_default_on() {
         let settings: Settings = serde_json::from_str(r#"{"worker_count":4}"#).unwrap();
         assert!(settings.notify_on_finish);
+        assert_eq!(settings.update_check_days, 7);
+        assert!(settings.update_check_due(1_000_000));
     }
 }

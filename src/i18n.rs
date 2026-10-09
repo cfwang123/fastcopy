@@ -24,6 +24,14 @@ pub struct Strings {
     pub recycle_bin: &'static str,
     pub permanent: &'static str,
     pub notify_on_finish: &'static str,
+    pub check_update: &'static str,
+    pub update_checking: &'static str,
+    pub update_check_days: &'static str,
+    pub days_suffix: &'static str,
+    pub update_cancel: &'static str,
+    pub update_cancelled: &'static str,
+    pub update_need_7z: &'static str,
+    pub update_no_package: &'static str,
     pub shell_menu: &'static str,
     pub registered: &'static str,
     pub registered_machine: &'static str,
@@ -105,6 +113,14 @@ pub const ZH: Strings = Strings {
     recycle_bin: "移入回收站",
     permanent: "永久删除",
     notify_on_finish: "完成时提示",
+    check_update: "检查更新",
+    update_checking: "正在检查更新…",
+    update_check_days: "自动检查更新间隔（0 为不检查）",
+    days_suffix: " 天",
+    update_cancel: "取消下载",
+    update_cancelled: "已取消更新",
+    update_need_7z: "未找到 7-Zip（7z.exe），无法解压 .7z 安装包。请安装 7-Zip，或到发布页手动下载。",
+    update_no_package: "最新发布里没有 .7z / .zip 安装包",
     shell_menu: "资源管理器右键菜单",
     registered: "已注册（当前用户）",
     registered_machine: "已注册（全机，需管理员卸载）",
@@ -186,6 +202,14 @@ pub const EN: Strings = Strings {
     recycle_bin: "Recycle Bin",
     permanent: "Permanent delete",
     notify_on_finish: "Notify when finished",
+    check_update: "Check for updates",
+    update_checking: "Checking for updates…",
+    update_check_days: "Check for updates every (0 = never)",
+    days_suffix: " days",
+    update_cancel: "Cancel download",
+    update_cancelled: "Update cancelled",
+    update_need_7z: "7-Zip (7z.exe) was not found, so the .7z package cannot be extracted. Install 7-Zip, or download the update from the releases page.",
+    update_no_package: "The latest release has no .7z / .zip package",
     shell_menu: "Explorer context menu",
     registered: "Registered (this user)",
     registered_machine: "Registered (all users; admin to uninstall)",
@@ -558,6 +582,73 @@ impl Strings {
             "Destination folder not specified"
         } else {
             "未指定目标文件夹"
+        }
+    }
+
+    pub fn current_version(&self, version: &str) -> String {
+        if self.en() {
+            format!("Current version: {version}")
+        } else {
+            format!("当前版本：{version}")
+        }
+    }
+
+    pub fn update_found(&self, current: &str, latest: &str, file: &str, size: u64) -> String {
+        let size = if size > 0 {
+            crate::tools::format_bytes(size)
+        } else {
+            "—".to_owned()
+        };
+        if self.en() {
+            format!(
+                "A new version is available. Download and install it?\n\nCurrent: {current}\nLatest: {latest}\nFile: {file}\nSize: {size}\n\nFastCopy closes during the install and restarts by itself. Restart Explorer afterwards so the context menu loads the new extension."
+            )
+        } else {
+            format!(
+                "发现新版本，是否下载并安装？\n\n当前：{current}\n最新：{latest}\n文件：{file}\n大小：{size}\n\n安装时会退出程序并自动重启。之后请重启资源管理器，右键菜单才会用上新的扩展。"
+            )
+        }
+    }
+
+    pub fn update_latest(&self, current: &str, latest: &str) -> String {
+        if self.en() {
+            format!("You already have the latest version.\n\nCurrent: {current}\nLatest: {latest}")
+        } else {
+            format!("当前已是最新版本。\n\n当前：{current}\n线上：{latest}")
+        }
+    }
+
+    pub fn update_failed(&self, error: &str) -> String {
+        if self.en() {
+            format!("Could not check or download the update:\n{error}\n\nOpen the releases page to download it manually?")
+        } else {
+            format!("检查或下载更新失败：\n{error}\n\n是否打开发布页手动下载？")
+        }
+    }
+
+    pub fn update_apply_failed(&self, error: &str) -> String {
+        if self.en() {
+            format!("Installing the update failed: {error}")
+        } else {
+            format!("安装更新失败：{error}")
+        }
+    }
+
+    pub fn update_downloading(&self, done: u64, total: u64) -> String {
+        let done_text = crate::tools::format_bytes(done);
+        if total == 0 {
+            return if self.en() {
+                format!("Downloading update… {done_text}")
+            } else {
+                format!("正在下载更新… {done_text}")
+            };
+        }
+        let percent = done.saturating_mul(100) / total;
+        let total_text = crate::tools::format_bytes(total);
+        if self.en() {
+            format!("Downloading update… {percent}% ({done_text} / {total_text})")
+        } else {
+            format!("正在下载更新… {percent}%（{done_text} / {total_text}）")
         }
     }
 

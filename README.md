@@ -83,6 +83,10 @@ Paste/Cancel on a folder background follow the UI language immediately. The Fast
 - Locked/in-use files are skipped and listed at the end for retry.
 - Compact WinForms-like 9pt UI; the window always opens centered on the current screen.
 
+## Updates
+
+Settings shows the current version and a **Check for updates** button. It reads the latest GitHub release; when a newer package (`fastcopy_<version>.7z` or `.zip`) exists, you confirm, it downloads with progress (cancel any time), FastCopy closes, the files are replaced, and FastCopy restarts. Opening Settings also checks quietly every N days (default 7, 0 turns it off). If GitHub is unreachable, mirror sites are tried; with the Chinese UI the mirrors are tried first for the download. A `.7z` package needs 7-Zip installed. After an update that replaces `fastcopy_shell.dll`, restart Explorer.
+
 ## Command line
 
 Headless copy, move, or delete:
