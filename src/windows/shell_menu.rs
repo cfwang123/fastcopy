@@ -40,9 +40,9 @@ const CASCADE_OPEN_TARGET: &str = r"shell\6open";
 const CASCADE_SHOW_SOURCE: &str = r"shell\6path";
 const CASCADE_SIZE: &str = r"shell\7size";
 const CASCADE_COPY_PATHS: &str = r"shell\8copypath";
-const CASCADE_RENAME: &str = r"shell\9rename";
 const CASCADE_SETTINGS: &str = r"shell\zsettings";
-const BACKGROUND_RENAME_VERB: &str = r"Directory\Background\shell\FastCopyRename";
+const LEGACY_CASCADE_RENAME: &str = r"shell\9rename";
+const LEGACY_RENAME_VERB: &str = r"Directory\Background\shell\FastCopyRename";
 const SHELL_CLSID: &str = "{B3E8D47A-6C1F-4A92-9E05-8F4C2B17A6D0}";
 const SHELL_DLL_NAME: &str = "fastcopy_shell.dll";
 const SHELL_HANDLER: &str = "FastCopyShell";
@@ -348,64 +348,32 @@ pub fn refresh_background_verbs() {
         if show_background_verbs().is_ok() || icons_changed {
             notify_assoc_changed();
         }
-        sync_rename_menu();
         return;
     }
     sync_background_verbs(false);
     if icons_changed {
         notify_assoc_changed();
     }
-    sync_rename_menu();
 }
 
-pub fn sync_rename_menu() {
-    let enabled = batch_rename_menu_enabled();
-    let mut changed = false;
-    for (hive, classes) in [
-        (HKEY_CURRENT_USER, r"Software\Classes"),
-        (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes"),
-    ] {
-        changed |= apply_rename_menu(hive, classes, enabled).unwrap_or(false);
+fn legacy_rename_paths(classes: &str) -> [String; 2] {
+    [
+        format!(r"{}\{LEGACY_CASCADE_RENAME}", menu_store(classes)),
+        format!(r"{classes}\{LEGACY_RENAME_VERB}"),
+    ]
+}
+
+fn legacy_rename_present(hive: winreg::HKEY, classes: &str) -> bool {
+    legacy_rename_paths(classes)
+        .iter()
+        .any(|path| hive_has(hive, path))
+}
+
+fn delete_legacy_rename(root: &RegKey, classes: &str) -> Result<()> {
+    for path in legacy_rename_paths(classes) {
+        delete_if_exists(root, &path)?;
     }
-    if changed {
-        notify_assoc_changed();
-    }
-}
-
-fn batch_rename_menu_enabled() -> bool {
-    read_json::<Settings>(&settings_path())
-        .map(|settings| settings.batch_rename_menu)
-        .unwrap_or(false)
-}
-
-fn apply_rename_menu(hive: winreg::HKEY, classes: &str, enabled: bool) -> Result<bool> {
-    let root = RegKey::predef(hive);
-    let mut changed = false;
-    for path in [
-        format!(r"{}\{CASCADE_RENAME}", menu_store(classes)),
-        format!(r"{classes}\{BACKGROUND_RENAME_VERB}"),
-    ] {
-        let Ok(key) = root.open_subkey_with_flags(&path, KEY_READ | KEY_SET_VALUE) else {
-            continue;
-        };
-        if verb_key_hidden(&key) == !enabled {
-            continue;
-        }
-        if enabled {
-            delete_value_if_exists(&key, "LegacyDisable")?;
-            delete_value_if_exists(&key, "ProgrammaticAccessOnly")?;
-        } else {
-            key.set_value("LegacyDisable", &"")?;
-            key.set_value("ProgrammaticAccessOnly", &"")?;
-        }
-        changed = true;
-    }
-    Ok(changed)
-}
-
-fn verb_key_hidden(key: &RegKey) -> bool {
-    key.get_value::<String, _>("LegacyDisable").is_ok()
-        && key.get_value::<String, _>("ProgrammaticAccessOnly").is_ok()
+    Ok(())
 }
 
 pub fn try_update_menu_labels() {
@@ -424,12 +392,6 @@ pub fn try_update_menu_labels() {
             };
             updated |= set_verb_label(hive, &path, label).is_ok();
         }
-        updated |= set_background_verb_label(
-            hive,
-            &format!(r"{classes}\{BACKGROUND_RENAME_VERB}"),
-            t.menu_rename,
-        )
-        .is_ok();
     }
     let paste_label = paste_menu_label(t);
     updated |= set_background_verb_label(HKEY_CURRENT_USER, HKCU_PASTE_VERB, &paste_label).is_ok();
@@ -478,8 +440,8 @@ fn register_hive(hive: winreg::HKEY, classes: &str) -> Result<()> {
         &root,
         &format!(r"{classes}\Directory\Background\shell\FastCopyRust"),
     )?;
+    delete_legacy_rename(&root, classes)?;
     apply_background_verbs(clipboard_has_items())?;
-    let _ = apply_rename_menu(hive, classes, batch_rename_menu_enabled());
     notify_assoc_changed();
     Ok(())
 }
@@ -492,7 +454,7 @@ fn menu_store(classes: &str) -> String {
     format!(r"{prefix}\FastCopyMenu")
 }
 
-fn menu_label_entries(t: &'static crate::i18n::Strings) -> [(&'static str, &'static str); 12] {
+fn menu_label_entries(t: &'static crate::i18n::Strings) -> [(&'static str, &'static str); 11] {
     [
         ("", t.menu_cascade),
         (CASCADE_CUT, t.menu_cut),
@@ -504,7 +466,6 @@ fn menu_label_entries(t: &'static crate::i18n::Strings) -> [(&'static str, &'sta
         (CASCADE_SHOW_SOURCE, t.menu_show_source),
         (CASCADE_SIZE, t.menu_size),
         (CASCADE_COPY_PATHS, t.menu_copy_paths),
-        (CASCADE_RENAME, t.menu_rename),
         (CASCADE_SETTINGS, t.settings_title),
     ]
 }
@@ -524,16 +485,13 @@ fn write_menu_labels(root: &RegKey, store: &str, t: &'static crate::i18n::String
 
 fn write_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
     let t = ui_strings();
-    let executable = env::current_exe().context(t.cannot_get_exe_path())?;
-    let executable = executable.to_string_lossy();
-    let icons = install_menu_icons()?;
+    install_menu_icons()?;
     let root = RegKey::predef(hive);
     // Labels stay outside shell\ so Explorer cannot draw a second 快速复制.
     write_menu_labels(&root, &menu_store(classes), t)?;
     for rel in VISIBLE_CASCADES {
         delete_if_exists(&root, &format!(r"{classes}\{rel}"))?;
     }
-    write_background_rename(&root, classes, &executable, &icons)?;
     Ok(())
 }
 
@@ -677,7 +635,7 @@ fn delete_cascade_keys(hive: winreg::HKEY, classes: &str) -> Result<()> {
     for rel in [
         r"Directory\Background\shell\FastCopyPaste",
         r"Directory\Background\shell\FastCopyClear",
-        BACKGROUND_RENAME_VERB,
+        LEGACY_RENAME_VERB,
     ] {
         delete_if_exists(&root, &format!(r"{classes}\{rel}"))?;
     }
@@ -998,22 +956,6 @@ fn notify_shell(folder: Option<&Path>) {
     }
 }
 
-fn write_background_rename(
-    root: &RegKey,
-    classes: &str,
-    executable: &str,
-    icons: &Path,
-) -> Result<()> {
-    let t = ui_strings();
-    upsert_background_verb(
-        root,
-        &format!(r"{classes}\{BACKGROUND_RENAME_VERB}"),
-        t.menu_rename,
-        &format!("\"{executable}\" --shell-rename \"%V\""),
-        &icons.join("rename.ico"),
-    )
-}
-
 fn visible_cascade_present(hive: winreg::HKEY, classes: &str) -> bool {
     VISIBLE_CASCADES
         .iter()
@@ -1028,22 +970,13 @@ fn menu_labels_ready(hive: winreg::HKEY, classes: &str) -> bool {
         && hive_has(hive, &format!(r"{store}\{CASCADE_OPEN_TARGET}"))
         && hive_has(hive, &format!(r"{store}\{CASCADE_SHOW_SOURCE}"))
         && hive_has(hive, &format!(r"{store}\{CASCADE_SETTINGS}"))
-        && hive_has(hive, &format!(r"{store}\{CASCADE_RENAME}"))
 }
 
 fn menu_needs_repair(hive: winreg::HKEY, classes: &str) -> bool {
     visible_cascade_present(hive, classes)
+        || legacy_rename_present(hive, classes)
         || !com_handler_ready(hive, classes)
         || !menu_labels_ready(hive, classes)
-}
-
-#[cfg(test)]
-fn verb_is_hidden(hive: winreg::HKEY, path: &str) -> bool {
-    let Ok(key) = RegKey::predef(hive).open_subkey(path) else {
-        return false;
-    };
-    key.get_value::<String, _>("LegacyDisable").is_ok()
-        && key.get_value::<String, _>("ProgrammaticAccessOnly").is_ok()
 }
 
 fn repair_cascade_menu(hive: winreg::HKEY, classes: &str) -> Result<()> {
@@ -1126,7 +1059,7 @@ fn rewrite_menu_icons_if_changed() -> bool {
     install_menu_icons().is_ok()
 }
 
-fn menu_icon_files() -> [(&'static str, &'static [u8]); 9] {
+fn menu_icon_files() -> [(&'static str, &'static [u8]); 8] {
     [
         (
             "app.ico",
@@ -1155,10 +1088,6 @@ fn menu_icon_files() -> [(&'static str, &'static [u8]); 9] {
         (
             "path.ico",
             include_bytes!("../../assets/icons/path.ico").as_slice(),
-        ),
-        (
-            "rename.ico",
-            include_bytes!("../../assets/icons/rename.ico").as_slice(),
         ),
         (
             "settings.ico",
@@ -1300,16 +1229,14 @@ mod tests {
             HKEY_CURRENT_USER,
             &format!(r"{store}\{CASCADE_SHOW_SOURCE}")
         ));
-        let rename_key = format!(r"{store}\{CASCADE_RENAME}");
-        let background_rename = format!(r"{TEST_CLASSES}\{BACKGROUND_RENAME_VERB}");
-        assert!(apply_rename_menu(HKEY_CURRENT_USER, TEST_CLASSES, false).unwrap());
-        assert!(verb_is_hidden(HKEY_CURRENT_USER, &rename_key));
-        assert!(verb_is_hidden(HKEY_CURRENT_USER, &background_rename));
-        assert!(apply_rename_menu(HKEY_CURRENT_USER, TEST_CLASSES, true).unwrap());
-        assert!(!verb_is_hidden(HKEY_CURRENT_USER, &rename_key));
-        assert!(!verb_is_hidden(HKEY_CURRENT_USER, &background_rename));
-        assert!(!apply_rename_menu(HKEY_CURRENT_USER, TEST_CLASSES, true).unwrap());
-        assert!(hive_has(HKEY_CURRENT_USER, &background_rename));
+        assert!(!menu_needs_repair(HKEY_CURRENT_USER, TEST_CLASSES));
+        let root = RegKey::predef(HKEY_CURRENT_USER);
+        for path in legacy_rename_paths(TEST_CLASSES) {
+            root.create_subkey(&path).unwrap();
+        }
+        assert!(menu_needs_repair(HKEY_CURRENT_USER, TEST_CLASSES));
+        delete_legacy_rename(&root, TEST_CLASSES).unwrap();
+        assert!(!legacy_rename_present(HKEY_CURRENT_USER, TEST_CLASSES));
         assert!(!menu_needs_repair(HKEY_CURRENT_USER, TEST_CLASSES));
         let (legacy, _) = RegKey::predef(HKEY_CURRENT_USER)
             .create_subkey(&file_key)

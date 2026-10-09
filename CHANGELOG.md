@@ -5,15 +5,12 @@ Each version section is English, then Chinese.
 
 ## unreleased
 
+- Remove Batch rename: the Explorer menu item (folder submenu and folder background), its window, and the Settings checkbox. Existing menus drop the leftover entry on the next launch. After this update, restart Explorer so it loads the new `fastcopy_shell.dll`.
 - Windows resource compile uses an absolute icon path, so `cargo build` still finds `assets/icons/app.ico` when the build script’s working directory is not the project root.
 - Unregister removes every Explorer **FastCopy** entry: the shell extension and the leftover registry cascade (`FastCopyRust` on files and folders, plus every `FastCopyShell` handler). A second **快速复制** does not stay behind. The cascade is no longer a visible menu; its wording is stored outside `shell`. The handler is registered once, on `AllFilesystemObjects`. After this update, start the app once and restart Explorer.
-- Settings can show or hide the Explorer **Batch rename** command. It is off by default, including on the folder submenu and on a folder background. Saving the checkbox applies it on the next menu. After this update, restart Explorer so it loads the new `fastcopy_shell.dll`.
 - The Explorer submenu appears once. The registry cascade stays as the COM handler’s label source and is hidden, so it is no longer listed together with the shell extension.
 - Real-time speed, files/s, and time remaining follow the last 3 seconds of completed bytes, so a fast start no longer keeps the speed high after the copy slows down. With no recent progress the remaining time shows `--:--`.
-- Batch rename lists keep a fixed height with a scrollbar, so expression fields and OK/Cancel stay visible when there are many files.
-- Batch rename from a folder lists that folder’s files first; you must select files before the rename page. The folder you right-clicked is not treated as the item to rename.
 - Debug `fastcopy.exe` no longer opens a console window when launched from Explorer (same as Release).
-- Batch rename is no longer on a multi-file selection. Right-click a folder or folder background.
 - Explorer FastCopy submenu still appears when more than 100 items are selected (COM context menu handler). The handler no longer skips when Explorer’s IDataObject reports 100 or fewer items (a large selection often arrives as one file). Existing menus are repaired on the next launch. After updating `fastcopy_shell.dll`, restart Explorer so it reloads the DLL.
 - After `cargo build --release`, copy `fastcopy.exe` and sibling `*.dll` to `release/`.
 - Symbolic/hard-link paste no longer shows a finish toast. On failure, a message box lists the error (Win32 text; privilege 1314 mentions Developer Mode).
@@ -21,15 +18,12 @@ Each version section is English, then Chinese.
 - Remove the Settings toggle for the symbolic/hard-link finish toast.
 - Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
 
+- 去掉批量改名：右键菜单项（文件夹子菜单和文件夹空白处）、改名窗口和参数设置里的开关都已删除。已注册的菜单会在下次启动时清掉残留项。更新后请重启资源管理器，以便加载新的 `fastcopy_shell.dll`。
 - 编译 Windows 资源时使用图标的绝对路径，构建脚本的工作目录不是项目根时也能找到 `assets/icons/app.ico`。
 - 卸载右键菜单时，会同时删掉外壳扩展和残留的注册表级联菜单（文件/文件夹上的 `FastCopyRust`，以及每一处 `FastCopyShell`）。不会留下第二条「快速复制」。级联菜单不再作为可见菜单注册，文案改存到 `shell` 之外。处理程序只在 `AllFilesystemObjects` 注册一次。更新后请启动一次程序，并重启资源管理器。
-- 参数设置可启用或关闭右键「批量改名」，默认关闭。文件夹子菜单和文件夹空白处一起生效。勾选后即写入设置，下次打开右键菜单生效。更新后请重启资源管理器，以便加载新的 `fastcopy_shell.dll`。
 - 右键「快速复制」只出现一次。注册表级联菜单仍给 COM 扩展提供文字，但不再显示，因此不会和扩展各占一条。
 - 实时速度、文件速度和预计剩余按最近 3 秒的已完成量计算。开头很快、后面变慢时，速度不再停在高位。最近没有进度时，预计剩余显示 `--:--`。
-- 批量改名的原/新文件名列表固定高度并带滚动条，文件很多时表达式和确定/取消仍能看见。
-- 对文件夹做批量改名时，先列出该文件夹里的文件，勾选后才能进入改名页。右键的那个文件夹本身不会被当成改名对象。
 - Debug 的 `fastcopy.exe` 从资源管理器启动时不再弹出控制台黑窗口（与 Release 一样）。
-- 批量改名不再出现在多选文件的右键里。改为右键文件夹或文件夹空白处。
 - 选中超过 100 项时「快速复制」子菜单仍会出现（COM 右键扩展）。资源管理器多选时 IDataObject 常常只带一项，扩展不再因此跳过。已注册菜单会在下次启动时自动补上。更新 `fastcopy_shell.dll` 后请重启资源管理器，否则仍加载旧 DLL。
 - 符号/硬链接粘贴成功后不再弹右下角通知；失败时弹出窗口说明原因（含 Win32 说明；1314 会提示需要开发人员模式）。
 - 粘贴为符号链接时，若因权限不足（或拒绝访问）失败，弹出一次 UAC，同意后以管理员重试。README 补充开发人员模式与 UAC 的区别，以及复制/移动「保留为链接」不会提权。

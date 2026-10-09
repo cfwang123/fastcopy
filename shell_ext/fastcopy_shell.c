@@ -13,8 +13,8 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "uuid.lib")
 
-enum { BMP_APP = 0, BMP_CUT, BMP_COPY, BMP_DELETE, BMP_SIZE, BMP_PATH, BMP_RENAME, BMP_SETTINGS, BMP_COUNT };
-enum { CMD_CUT = 0, CMD_COPY, CMD_DELETE, CMD_SYMLINK, CMD_HARDLINK, CMD_OPEN, CMD_SHOW, CMD_SIZE, CMD_COPYPATH, CMD_RENAME, CMD_SETTINGS, CMD_COUNT };
+enum { BMP_APP = 0, BMP_CUT, BMP_COPY, BMP_DELETE, BMP_SIZE, BMP_PATH, BMP_SETTINGS, BMP_COUNT };
+enum { CMD_CUT = 0, CMD_COPY, CMD_DELETE, CMD_SYMLINK, CMD_HARDLINK, CMD_OPEN, CMD_SHOW, CMD_SIZE, CMD_COPYPATH, CMD_SETTINGS, CMD_COUNT };
 
 static const GUID CLSID_FastCopyMenu = {0xB3E8D47A, 0x6C1F, 0x4A92, {0x9E, 0x05, 0x8F, 0x4C, 0x2B, 0x17, 0xA6, 0xD0}};
 static const WCHAR kCascadeZh[] = {0x5FEB, 0x901F, 0x590D, 0x5236, 0};
@@ -28,7 +28,6 @@ struct Handler {
 	IShellExtInit init;
 	LONG ref;
 	UINT nfiles;
-	UINT is_folder;
 	WCHAR first[32768];
 	HBITMAP bmp[BMP_COUNT];
 };
@@ -40,7 +39,6 @@ static void handler_clear_bitmaps(struct Handler *h);
 static HRESULT launch(struct Handler *h, UINT id);
 static int exe_path(WCHAR *out, UINT cap);
 static int menu_has_cascade(HMENU menu);
-static int rename_menu_enabled(void);
 static int is_single_link(struct Handler *h);
 static void read_label(const WCHAR *sub, WCHAR *out, UINT cap, const WCHAR *fallback);
 static HBITMAP load_icon_bitmap(const WCHAR *name);
@@ -74,7 +72,6 @@ static HRESULT STDMETHODCALLTYPE Menu_QueryContextMenu(IContextMenu *this, HMENU
 	h->bmp[BMP_DELETE] = load_icon_bitmap(L"delete.ico");
 	h->bmp[BMP_SIZE] = load_icon_bitmap(L"size.ico");
 	h->bmp[BMP_PATH] = load_icon_bitmap(L"path.ico");
-	h->bmp[BMP_RENAME] = load_icon_bitmap(L"rename.ico");
 	h->bmp[BMP_SETTINGS] = load_icon_bitmap(L"settings.ico");
 	sub = CreatePopupMenu();
 	if(!sub) return E_OUTOFMEMORY;
@@ -91,9 +88,6 @@ static HRESULT STDMETHODCALLTYPE Menu_QueryContextMenu(IContextMenu *this, HMENU
 		}
 		insert_cmd(sub, pos++, idCmdFirst + CMD_SIZE, L"shell\\7size", L"Folder size", h->bmp[BMP_SIZE]);
 		insert_cmd(sub, pos++, idCmdFirst + CMD_COPYPATH, L"shell\\8copypath", L"Copy paths", h->bmp[BMP_PATH]);
-		if(h->is_folder && rename_menu_enabled()){
-			insert_cmd(sub, pos++, idCmdFirst + CMD_RENAME, L"shell\\9rename", L"Batch rename", h->bmp[BMP_RENAME]);
-		}
 		InsertMenuW(sub, pos++, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
 		insert_cmd(sub, pos++, idCmdFirst + CMD_SETTINGS, L"shell\\zsettings", L"Settings", h->bmp[BMP_SETTINGS]);
 	}
@@ -152,14 +146,11 @@ static HRESULT STDMETHODCALLTYPE Init_Initialize(IShellExtInit *this, LPCITEMIDL
 	STGMEDIUM stg;
 	UINT n_drop = 0, n_ida = 0;
 	WCHAR drop_first[32768], ida_first[32768], folder[32768];
-	DWORD attr;
 	(void)hkeyProgID;
 	h->nfiles = 0;
-	h->is_folder = 0;
 	h->first[0] = 0;
 	drop_first[0] = 0;
 	ida_first[0] = 0;
-	attr = 0;
 	if(pdtobj){
 		memset(&fe, 0, sizeof(fe));
 		fe.dwAspect = DVASPECT_CONTENT;
@@ -198,14 +189,7 @@ static HRESULT STDMETHODCALLTYPE Init_Initialize(IShellExtInit *this, LPCITEMIDL
 	}
 	if(pidlFolder){
 		folder[0] = 0;
-		if(SHGetPathFromIDListW(pidlFolder, folder) && folder[0]){
-			h->is_folder = 1;
-			if(!h->first[0]) lstrcpynW(h->first, folder, 32768);
-		}
-	}
-	if(h->first[0]){
-		attr = GetFileAttributesW(h->first);
-		if(attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) h->is_folder = 1;
+		if(SHGetPathFromIDListW(pidlFolder, folder) && folder[0] && !h->first[0]) lstrcpynW(h->first, folder, 32768);
 	}
 	return S_OK;
 }
@@ -336,7 +320,6 @@ static HRESULT launch(struct Handler *h, UINT id){
 	case CMD_SHOW: flag = L"--shell-show-source"; break;
 	case CMD_SIZE: flag = L"--shell-size"; break;
 	case CMD_COPYPATH: flag = L"--shell-copy-path"; break;
-	case CMD_RENAME: flag = L"--shell-rename"; break;
 	case CMD_SETTINGS: flag = L"--settings"; break;
 	default: return E_INVALIDARG;
 	}
@@ -378,20 +361,6 @@ static void strip_amp(WCHAR *s){
 	*w = 0;
 }
 
-static int reg_has_legacy_disable(HKEY hive, const WCHAR *path){
-	HKEY key;
-	DWORD n, type;
-	WCHAR value[8];
-	if(RegOpenKeyExW(hive, path, 0, KEY_READ, &key) != 0) return -1;
-	n = sizeof(value);
-	if(RegQueryValueExW(key, L"LegacyDisable", NULL, &type, (BYTE *)value, &n) == 0){
-		RegCloseKey(key);
-		return 1;
-	}
-	RegCloseKey(key);
-	return 0;
-}
-
 static int reg_mui(HKEY hive, const WCHAR *path, WCHAR *out, UINT cap){
 	HKEY key;
 	DWORD n, type;
@@ -400,19 +369,6 @@ static int reg_mui(HKEY hive, const WCHAR *path, WCHAR *out, UINT cap){
 	if(RegQueryValueExW(key, L"MUIVerb", NULL, &type, (BYTE *)out, &n) != 0 || type != REG_SZ) out[0] = 0;
 	RegCloseKey(key);
 	return out[0] != 0;
-}
-
-static int rename_menu_enabled(void){
-	int user = reg_has_legacy_disable(HKEY_CURRENT_USER, L"Software\\FastCopyMenu\\shell\\9rename");
-	int machine;
-	if(user >= 0) return user == 0;
-	machine = reg_has_legacy_disable(HKEY_LOCAL_MACHINE, L"SOFTWARE\\FastCopyMenu\\shell\\9rename");
-	if(machine >= 0) return machine == 0;
-	user = reg_has_legacy_disable(HKEY_CURRENT_USER, L"Software\\Classes\\Directory\\shell\\FastCopyRust\\shell\\9rename");
-	if(user >= 0) return user == 0;
-	machine = reg_has_legacy_disable(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\Directory\\shell\\FastCopyRust\\shell\\9rename");
-	if(machine >= 0) return machine == 0;
-	return 0;
 }
 
 static int is_single_link(struct Handler *h){

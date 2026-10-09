@@ -215,17 +215,6 @@ fn run() -> Result<i32> {
             crate::notify::message(t, &t.paths_copied(count));
             return Ok(0);
         }
-        Some("--shell-rename") => {
-            let folder = rename_folder(&arguments, t)?;
-            let Some(claim) = shell_menu::claim_selection("rename", vec![folder.clone()])? else {
-                return Ok(0);
-            };
-            let folder = claim.paths.first().cloned().unwrap_or(folder);
-            let result = app::run_rename_dialog(folder);
-            drop(claim);
-            result?;
-            return Ok(0);
-        }
         Some(argument) => return Err(anyhow!("{}", t.unknown_cli_argument(argument))),
         None => {}
     }
@@ -400,15 +389,4 @@ fn shell_selection(arguments: &[String]) -> Vec<PathBuf> {
         Some(path) => windows::explorer_sel::selected_paths(std::path::Path::new(path)),
         None => windows::explorer_sel::current_selection(),
     }
-}
-
-fn rename_folder(arguments: &[String], t: &crate::i18n::Strings) -> Result<PathBuf> {
-    let path = argument_path(arguments, t)?;
-    if path.is_dir() {
-        return Ok(path);
-    }
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("{}", t.missing_cli_path()))
 }

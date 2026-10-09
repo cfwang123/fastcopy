@@ -24,7 +24,6 @@ pub struct Strings {
     pub recycle_bin: &'static str,
     pub permanent: &'static str,
     pub notify_on_finish: &'static str,
-    pub batch_rename_menu: &'static str,
     pub shell_menu: &'static str,
     pub registered: &'static str,
     pub registered_machine: &'static str,
@@ -66,31 +65,11 @@ pub struct Strings {
     pub menu_show_source: &'static str,
     pub menu_size: &'static str,
     pub menu_copy_paths: &'static str,
-    pub menu_rename: &'static str,
     pub size_files: &'static str,
     pub size_dirs: &'static str,
     pub size_bytes: &'static str,
     pub size_errors: &'static str,
     pub size_copy: &'static str,
-    pub rename_old_list: &'static str,
-    pub rename_old_list_hint: &'static str,
-    pub rename_old_expr: &'static str,
-    pub rename_new_expr: &'static str,
-    pub rename_match_case: &'static str,
-    pub rename_regex: &'static str,
-    pub rename_ignore_ext: &'static str,
-    pub rename_number_hint: &'static str,
-    pub rename_new_list: &'static str,
-    pub rename_pick_hint: &'static str,
-    pub rename_filter: &'static str,
-    pub rename_select_all: &'static str,
-    pub rename_select_none: &'static str,
-    pub rename_invert: &'static str,
-    pub rename_next: &'static str,
-    pub rename_back: &'static str,
-    pub rename_empty_folder: &'static str,
-    pub ok: &'static str,
-    pub cancel: &'static str,
     pub current_item: &'static str,
     pub source_path: &'static str,
     pub copy_path: &'static str,
@@ -126,7 +105,6 @@ pub const ZH: Strings = Strings {
     recycle_bin: "移入回收站",
     permanent: "永久删除",
     notify_on_finish: "完成时提示",
-    batch_rename_menu: "右键菜单显示「批量改名」",
     shell_menu: "资源管理器右键菜单",
     registered: "已注册（当前用户）",
     registered_machine: "已注册（全机，需管理员卸载）",
@@ -168,31 +146,11 @@ pub const ZH: Strings = Strings {
     menu_show_source: "查看源路径",
     menu_size: "统计大小",
     menu_copy_paths: "复制路径",
-    menu_rename: "批量改名",
     size_files: "文件",
     size_dirs: "目录",
     size_bytes: "大小",
     size_errors: "无法访问",
     size_copy: "复制结果",
-    rename_old_list: "原文件名",
-    rename_old_list_hint: "可删行或调整顺序，改完后会重算新文件名",
-    rename_old_expr: "原文件名表达式",
-    rename_new_expr: "新文件名表达式",
-    rename_match_case: "匹配大小写",
-    rename_regex: "正则表达式",
-    rename_ignore_ext: "忽略扩展名",
-    rename_number_hint: "表达式：旧名中的 %1 或 * 为捕获，新名 %1 为第 1 个捕获，# 编号",
-    rename_new_list: "新文件名",
-    rename_pick_hint: "选择要改名的文件（当前文件夹内）",
-    rename_filter: "筛选",
-    rename_select_all: "全选",
-    rename_select_none: "全不选",
-    rename_invert: "反选",
-    rename_next: "下一步",
-    rename_back: "重选文件",
-    rename_empty_folder: "此文件夹没有可改名的项",
-    ok: "确定",
-    cancel: "取消",
     current_item: "当前项",
     source_path: "源路径",
     copy_path: "复制路径",
@@ -228,7 +186,6 @@ pub const EN: Strings = Strings {
     recycle_bin: "Recycle Bin",
     permanent: "Permanent delete",
     notify_on_finish: "Notify when finished",
-    batch_rename_menu: "Show Batch rename in the context menu",
     shell_menu: "Explorer context menu",
     registered: "Registered (this user)",
     registered_machine: "Registered (all users; admin to uninstall)",
@@ -270,31 +227,11 @@ pub const EN: Strings = Strings {
     menu_show_source: "View source path",
     menu_size: "Folder size",
     menu_copy_paths: "Copy paths",
-    menu_rename: "Batch rename",
     size_files: "Files",
     size_dirs: "Folders",
     size_bytes: "Size",
     size_errors: "Unreadable",
     size_copy: "Copy summary",
-    rename_old_list: "Old names",
-    rename_old_list_hint: "Delete lines or reorder; new names are recalculated",
-    rename_old_expr: "Old filename pattern",
-    rename_new_expr: "New filename pattern",
-    rename_match_case: "Match case",
-    rename_regex: "Regular expressions",
-    rename_ignore_ext: "Ignore extension",
-    rename_number_hint: "Pattern: %1 or * in the old name is a capture; %1 in the new name is the first capture; # number",
-    rename_new_list: "New names",
-    rename_pick_hint: "Select files to rename in this folder",
-    rename_filter: "Filter",
-    rename_select_all: "Select all",
-    rename_select_none: "Select none",
-    rename_invert: "Invert",
-    rename_next: "Next",
-    rename_back: "Reselect",
-    rename_empty_folder: "This folder has nothing to rename",
-    ok: "OK",
-    cancel: "Cancel",
     current_item: "Current item",
     source_path: "Source path",
     copy_path: "Copy path",
@@ -507,70 +444,11 @@ impl Strings {
         }
     }
 
-    pub fn rename_done(&self, count: usize) -> String {
-        if self.en() {
-            format!("Renamed {count} item(s)")
-        } else {
-            format!("已重命名 {count} 项")
-        }
-    }
-
-    pub fn rename_none(&self) -> &'static str {
-        if self.en() {
-            "Nothing to rename"
-        } else {
-            "没有需要改名的项"
-        }
-    }
-
-    pub fn rename_selected_count(&self, selected: usize, total: usize) -> String {
-        if self.en() {
-            format!("Selected {selected} of {total}")
-        } else {
-            format!("已选 {selected} / {total} 项")
-        }
-    }
-
-    pub fn rename_status(&self, kind: crate::tools::RenameKind) -> &'static str {
-        match kind {
-            crate::tools::RenameKind::Ready => "",
-            crate::tools::RenameKind::Unchanged => {
-                if self.en() {
-                    "unchanged"
-                } else {
-                    "不变"
-                }
-            }
-            crate::tools::RenameKind::Invalid => {
-                if self.en() {
-                    "invalid name"
-                } else {
-                    "无效名称"
-                }
-            }
-            crate::tools::RenameKind::Conflict => {
-                if self.en() {
-                    "name exists"
-                } else {
-                    "目标已存在"
-                }
-            }
-        }
-    }
-
     pub fn clipboard_failed(&self, error: &str) -> String {
         if self.en() {
             format!("Could not write clipboard: {error}")
         } else {
             format!("无法写入剪贴板：{error}")
-        }
-    }
-
-    pub fn rename_failed(&self, error: &str) -> String {
-        if self.en() {
-            format!("Rename failed: {error}")
-        } else {
-            format!("改名失败：{error}")
         }
     }
 
