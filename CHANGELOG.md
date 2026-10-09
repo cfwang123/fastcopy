@@ -1,33 +1,55 @@
 # Changelog / 更新日志
 
-Each version section is English, then Chinese.
-每节先写英文，再写中文。
+Each version section is English, then Chinese, grouped into Added / Changed / Fixed (from v1.0.4 on).
+每节先写英文，再写中文，按新增 / 修改 / 修复分组（自 v1.0.4 起）。
 
 ## v1.0.4 (2026-08-31 ~ 10-09)
 
+### English
+
+#### Added
+
 - Check for updates from GitHub releases. Settings shows the current version, an automatic check interval (default every 7 days, 0 turns it off), and a **Check for updates** button beside it. A newer package downloads with progress and can be cancelled; FastCopy then closes, replaces its files, and restarts. Mirror sites are tried when GitHub is unreachable. A `.7z` package needs 7-Zip installed.
-- The release package now contains `fastcopy_shell.dll` as well as `fastcopy.exe` (the 1.0.3 package had only the exe).
+- Paste as symbolic link: when creation fails for a missing privilege (or access denied), UAC is shown once and the links are retried as administrator.
+
+#### Changed
+
 - Remove Batch rename: the Explorer menu item, its window, and the Settings option. Existing menus drop the leftover entry on the next launch.
+- Real-time speed, files/s, and time remaining follow the last 3 seconds of completed bytes, so a fast start no longer keeps the speed high. With no recent progress the remaining time shows `--:--`.
+- Symbolic/hard-link paste shows no finish toast; a failure opens a message box with the Windows error (1314 mentions Developer Mode). The Settings toggle for that toast is removed.
+- Gray gear icon for the Explorer Settings menu item.
+- `cargo build --release` copies `fastcopy.exe` and sibling DLLs to `release/` after every Rust change; a DLL held by Explorer is renamed to `*.old` first.
+
+#### Fixed
+
 - The Explorer **快速复制** submenu appears only once and stays near the top of the menu. Unregister removes both the shell extension and the old registry cascade. If an older FastCopy build writes that cascade back, the shell extension does not add a second submenu, and the next FastCopy command removes the leftover.
 - The submenu still appears when more than 100 items are selected.
-- Real-time speed, files/s, and time remaining follow the last 3 seconds of completed bytes, so a fast start no longer keeps the speed high. With no recent progress the remaining time shows `--:--`.
-- Symbolic/hard-link paste shows no finish toast; a failure opens a message box with the Windows error (1314 mentions Developer Mode). A missing privilege prompts UAC once and retries elevated. The Settings toggle for that toast is removed.
-- Gray gear icon for the Explorer Settings menu item.
+- The release package contains `fastcopy_shell.dll` as well as `fastcopy.exe` (the 1.0.3 package had only the exe).
 - Debug `fastcopy.exe` no longer opens a console window when started from Explorer.
-- Build: `cargo build --release` copies `fastcopy.exe` and sibling DLLs to `release/` after every Rust change, waiting for the link to finish; a DLL held by Explorer is renamed to `*.old` first. The Windows resource compile uses an absolute icon path.
-- After upgrading, start FastCopy once and restart Explorer so it loads the new `fastcopy_shell.dll`.
+- `cargo build --release` waits for the link to finish before copying, so `release/` no longer gets the previous exe. The Windows resource compile uses an absolute icon path.
+
+### 中文
+
+#### 新增
 
 - 从 GitHub Release 检查更新。设置页显示当前版本、自动检查间隔（默认每 7 天，填 0 关闭），旁边是「检查更新」按钮。有新版本时带进度下载，可取消；随后关闭快速复制、替换文件并重新启动。连不上 GitHub 时改用镜像站。`.7z` 安装包需要本机装有 7-Zip。
-- 发布包除 `fastcopy.exe` 外还包含 `fastcopy_shell.dll`（1.0.3 的包里只有 exe）。
+- 粘贴为符号链接时，若因权限不足（或拒绝访问）失败，弹出一次 UAC，同意后以管理员重试。
+
+#### 修改
+
 - 去掉批量改名：右键菜单项、改名窗口和设置项都已删除。已注册的菜单会在下次启动时清掉残留项。
+- 实时速度、文件速度和预计剩余按最近 3 秒的已完成量计算，开头很快时速度不再一直偏高。最近没有进度时，预计剩余显示 `--:--`。
+- 符号/硬链接粘贴成功后不弹通知；失败时弹窗显示 Windows 错误说明（1314 会提示开发人员模式）。设置里对应的通知开关已去掉。
+- 右键「参数设置」图标改为灰色齿轮。
+- 每次改 Rust 代码后 `cargo build --release` 都会把 `fastcopy.exe` 和同目录 DLL 复制到 `release/`；资源管理器占用的 DLL 先改名为 `*.old`。
+
+#### 修复
+
 - 右键「快速复制」子菜单只出现一次，并保持在菜单靠上的位置。卸载时同时删除外壳扩展和旧的注册表级联菜单。旧版快速复制把级联菜单写回时，外壳扩展不再插入第二个子菜单，下次执行快速复制命令时会清掉残留。
 - 选中超过 100 项时子菜单仍会出现。
-- 实时速度、文件速度和预计剩余按最近 3 秒的已完成量计算，开头很快时速度不再一直偏高。最近没有进度时，预计剩余显示 `--:--`。
-- 符号/硬链接粘贴成功后不弹通知；失败时弹窗显示 Windows 错误说明（1314 会提示开发人员模式）。权限不足时弹出一次 UAC，同意后以管理员重试。设置里对应的通知开关已去掉。
-- 右键「参数设置」图标改为灰色齿轮。
+- 发布包除 `fastcopy.exe` 外还包含 `fastcopy_shell.dll`（1.0.3 的包里只有 exe）。
 - Debug 的 `fastcopy.exe` 从资源管理器启动时不再弹出控制台窗口。
-- 构建：每次改 Rust 代码后 `cargo build --release` 都会等链接完成，再把 `fastcopy.exe` 和同目录 DLL 复制到 `release/`；资源管理器占用的 DLL 先改名为 `*.old`。编译 Windows 资源时使用图标的绝对路径。
-- 升级后请启动一次快速复制，并重启资源管理器，以便加载新的 `fastcopy_shell.dll`。
+- `cargo build --release` 等链接完成后再复制，`release/` 里不再是上一次的 exe。编译 Windows 资源时使用图标的绝对路径。
 
 ## v1.0.3 (2026-08-28)
 
