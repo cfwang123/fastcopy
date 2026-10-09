@@ -364,6 +364,17 @@ pub fn refresh_background_verbs() {
     }
 }
 
+pub fn heal_legacy_menu() {
+    for (hive, classes) in [
+        (HKEY_CURRENT_USER, r"Software\Classes"),
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes"),
+    ] {
+        if visible_cascade_present(hive, classes) || legacy_rename_present(hive, classes) {
+            let _ = repair_cascade_menu(hive, classes);
+        }
+    }
+}
+
 fn legacy_rename_paths(classes: &str) -> [String; 2] {
     [
         format!(r"{}\{LEGACY_CASCADE_RENAME}", menu_store(classes)),

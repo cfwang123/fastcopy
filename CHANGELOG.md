@@ -5,6 +5,8 @@ Each version section is English, then Chinese.
 
 ## unreleased
 
+- Avoid a second **快速复制** when an older FastCopy build writes its visible registry cascade back: the shell extension does not add its own submenu while that cascade is visible for the selected item, and any Explorer command run by this build removes the leftover cascade.
+- `cargo build --release` now copies `fastcopy.exe` to `release/` after a Rust-only change too. When Explorer holds `release/fastcopy_shell.dll`, the old file is renamed to `*.old` and the new one copied in; unlocked `*.old` files are removed.
 - Remove Batch rename: the Explorer menu item (folder submenu and folder background), its window, and the Settings checkbox. Existing menus drop the leftover entry on the next launch. After this update, restart Explorer so it loads the new `fastcopy_shell.dll`.
 - Windows resource compile uses an absolute icon path, so `cargo build` still finds `assets/icons/app.ico` when the build script’s working directory is not the project root.
 - Unregister removes every Explorer **FastCopy** entry: the shell extension and the leftover registry cascade (`FastCopyRust` on files and folders, plus every `FastCopyShell` handler). A second **快速复制** does not stay behind. The cascade is no longer a visible menu; its wording is stored outside `shell`. The handler stays on files, folders, and all filesystem objects, so the submenu keeps its place near the top of the menu instead of dropping to just above Send to. After this update, start the app once and restart Explorer.
@@ -18,6 +20,8 @@ Each version section is English, then Chinese.
 - Remove the Settings toggle for the symbolic/hard-link finish toast.
 - Use a gray gear for the Explorer Settings menu icon. The installed icon is replaced on the next launch.
 
+- 旧版 FastCopy 把可见的注册表级联菜单写回时，不再出现第二条「快速复制」：选中项上有这种级联菜单时，外壳扩展不再插入自己的子菜单；本版本从右键菜单执行任何命令时，都会顺带删掉残留的级联菜单。
+- `cargo build --release` 只改了 Rust 代码时也会把 `fastcopy.exe` 复制到 `release/`。资源管理器占用 `release/fastcopy_shell.dll` 时，先把旧文件改名为 `*.old` 再复制新文件；没被占用的 `*.old` 会被删掉。
 - 去掉批量改名：右键菜单项（文件夹子菜单和文件夹空白处）、改名窗口和参数设置里的开关都已删除。已注册的菜单会在下次启动时清掉残留项。更新后请重启资源管理器，以便加载新的 `fastcopy_shell.dll`。
 - 编译 Windows 资源时使用图标的绝对路径，构建脚本的工作目录不是项目根时也能找到 `assets/icons/app.ico`。
 - 卸载右键菜单时，会同时删掉外壳扩展和残留的注册表级联菜单（文件/文件夹上的 `FastCopyRust`，以及每一处 `FastCopyShell`）。不会留下第二条「快速复制」。级联菜单不再作为可见菜单注册，文案改存到 `shell` 之外。处理程序仍注册在文件、文件夹和所有文件系统对象上，子菜单保持在菜单靠上的位置，不会掉到「发送到」上面。更新后请启动一次程序，并重启资源管理器。

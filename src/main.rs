@@ -52,6 +52,9 @@ fn main() {
 fn run() -> Result<i32> {
     let arguments: Vec<String> = env::args().collect();
     let t = strings(app::load_settings().language);
+    if arguments.get(1).is_some_and(|flag| flag.starts_with("--shell-")) {
+        shell_menu::heal_legacy_menu();
+    }
     match arguments.get(1).map(String::as_str) {
         Some("--copy") | Some("--move") => {
             let kind = if arguments[1] == "--move" {

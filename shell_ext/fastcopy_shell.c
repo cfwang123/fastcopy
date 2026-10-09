@@ -39,6 +39,7 @@ static void handler_clear_bitmaps(struct Handler *h);
 static HRESULT launch(struct Handler *h, UINT id);
 static int exe_path(WCHAR *out, UINT cap);
 static int menu_has_cascade(HMENU menu);
+static int legacy_cascade_visible(struct Handler *h);
 static int is_single_link(struct Handler *h);
 static void read_label(const WCHAR *sub, WCHAR *out, UINT cap, const WCHAR *fallback);
 static HBITMAP load_icon_bitmap(const WCHAR *name);
@@ -65,6 +66,8 @@ static HRESULT STDMETHODCALLTYPE Menu_QueryContextMenu(IContextMenu *this, HMENU
 	if(uFlags & CMF_DEFAULTONLY) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
 	if(!hmenu) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
 	if(menu_has_cascade(hmenu)) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+	/* Explorer adds registry verbs after this call, so an old visible cascade cannot be seen in hmenu. */
+	if(legacy_cascade_visible(h)) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
 	handler_clear_bitmaps(h);
 	h->bmp[BMP_APP] = load_icon_bitmap(L"app.ico");
 	h->bmp[BMP_CUT] = load_icon_bitmap(L"cut.ico");
@@ -369,6 +372,27 @@ static int reg_mui(HKEY hive, const WCHAR *path, WCHAR *out, UINT cap){
 	if(RegQueryValueExW(key, L"MUIVerb", NULL, &type, (BYTE *)out, &n) != 0 || type != REG_SZ) out[0] = 0;
 	RegCloseKey(key);
 	return out[0] != 0;
+}
+
+static int cascade_visible(const WCHAR *progid){
+	WCHAR path[256];
+	HKEY key;
+	int visible;
+	if(FAILED(StringCchPrintfW(path, 256, L"%s\\shell\\FastCopyRust", progid))) return 0;
+	if(RegOpenKeyExW(HKEY_CLASSES_ROOT, path, 0, KEY_READ, &key) != 0) return 0;
+	visible = RegQueryValueExW(key, L"LegacyDisable", NULL, NULL, NULL, NULL) != 0;
+	RegCloseKey(key);
+	return visible;
+}
+
+static int legacy_cascade_visible(struct Handler *h){
+	static const WCHAR *file_ids[] = {L"*", L"AllFilesystemObjects", NULL};
+	static const WCHAR *dir_ids[] = {L"Directory", L"Folder", L"Drive", L"LibraryFolder", L"AllFilesystemObjects", NULL};
+	const WCHAR **ids;
+	DWORD attr = h->first[0] ? GetFileAttributesW(h->first) : INVALID_FILE_ATTRIBUTES;
+	ids = (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) ? dir_ids : file_ids;
+	for(; *ids; ids++) if(cascade_visible(*ids)) return 1;
+	return 0;
 }
 
 static int is_single_link(struct Handler *h){

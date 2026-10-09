@@ -47,13 +47,29 @@ def try_copy():
         if not os.path.isfile(s):
             continue
         d = os.path.join(dst_dir, name)
-        for _ in range(20):
-            try:
-                shutil.copy2(s, d)
-                break
-            except OSError:
-                time.sleep(0.25)
+        copy_dll(s, d)
     return True
+
+
+def copy_dll(s, d):
+    for _ in range(8):
+        try:
+            shutil.copy2(s, d)
+            return
+        except OSError:
+            time.sleep(0.25)
+    # Explorer keeps the shell extension loaded; a loaded DLL can be renamed but not overwritten.
+    try:
+        os.replace(d, f"{d}.{time.strftime('%Y%m%d_%H%M%S')}.old")
+        shutil.copy2(s, d)
+    except OSError:
+        pass
+    for old in os.listdir(os.path.dirname(d)):
+        if old.startswith(os.path.basename(d) + ".") and old.endswith(".old"):
+            try:
+                os.remove(os.path.join(os.path.dirname(d), old))
+            except OSError:
+                pass
 
 
 def our_compiler_running():

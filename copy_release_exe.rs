@@ -1,5 +1,8 @@
 fn spawn_copy_release_exe() {
     println!("cargo:rerun-if-changed=copy_release_exe.py");
+    // Without this, a Rust-only change skips the build script and release/ keeps the old exe.
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
     #[cfg(windows)]
     spawn_copy_release_exe_windows();
 }
