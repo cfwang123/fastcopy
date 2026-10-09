@@ -46,8 +46,16 @@ const LEGACY_RENAME_VERB: &str = r"Directory\Background\shell\FastCopyRename";
 const SHELL_CLSID: &str = "{B3E8D47A-6C1F-4A92-9E05-8F4C2B17A6D0}";
 const SHELL_DLL_NAME: &str = "fastcopy_shell.dll";
 const SHELL_HANDLER: &str = "FastCopyShell";
-/// One progid, so Explorer invokes the submenu once.
-const COM_REGISTER_PROGIDS: &[&str] = &["AllFilesystemObjects"];
+/// Explorer places `*` / `Directory` handlers near the top and `AllFilesystemObjects` ones just above Send to.
+/// The DLL skips insertion when the submenu is already present, so several progids still yield one entry.
+const COM_REGISTER_PROGIDS: &[&str] = &[
+    "*",
+    "Directory",
+    "Folder",
+    "AllFilesystemObjects",
+    r"SystemFileAssociations\video",
+    r"SystemFileAssociations\audio",
+];
 /// Every progid that has carried a FastCopy handler. Unregister deletes all of them.
 const COM_CLEANUP_PROGIDS: &[&str] = &[
     "*",
@@ -1356,11 +1364,10 @@ mod tests {
         let labels = crate::windows::explorer_sel::background_menu_labels(dir.path())
             .expect("query Explorer background menu");
         let joined = labels.join(" | ");
+        let expected = paste_menu_label(ui_strings());
         assert!(
-            labels
-                .iter()
-                .any(|label| label.contains("快速粘贴") || label.contains("Quick Paste")),
-            "background menu missing paste: {joined}"
+            labels.iter().any(|label| label.contains(&expected)),
+            "background menu missing {expected}: {joined}"
         );
         let key = RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey(HKCU_PASTE_VERB)
