@@ -638,17 +638,16 @@ impl Strings {
         let done_text = crate::tools::format_bytes(done);
         if total == 0 {
             return if self.en() {
-                format!("Downloading update… {done_text}")
+                format!("Downloading {done_text}")
             } else {
-                format!("正在下载更新… {done_text}")
+                format!("下载中 {done_text}")
             };
         }
         let percent = done.saturating_mul(100) / total;
-        let total_text = crate::tools::format_bytes(total);
         if self.en() {
-            format!("Downloading update… {percent}% ({done_text} / {total_text})")
+            format!("Downloading {percent}%")
         } else {
-            format!("正在下载更新… {percent}%（{done_text} / {total_text}）")
+            format!("下载中 {percent}%")
         }
     }
 

@@ -218,10 +218,8 @@ impl FastCopyApp {
         match &self.update_job {
             UpdateJob::Idle => start_check = ui.button(t.check_update).clicked(),
             UpdateJob::Checking { silent: false, .. } => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(t.update_checking);
-                });
+                ui.spinner();
+                ui.label(t.update_checking);
             }
             UpdateJob::Checking { .. } => {
                 ui.add_enabled(false, egui::Button::new(t.check_update));
@@ -232,9 +230,6 @@ impl FastCopyApp {
                 let done = progress.done.load(Ordering::Relaxed);
                 let total = progress.total.load(Ordering::Relaxed);
                 ui.label(t.update_downloading(done, total));
-                if total > 0 {
-                    ui.add(egui::ProgressBar::new(done as f32 / total as f32));
-                }
                 if ui.button(t.update_cancel).clicked() {
                     cancel.store(true, Ordering::Relaxed);
                 }
@@ -839,12 +834,14 @@ impl FastCopyApp {
         ui.separator();
         ui.label(t.current_version(updater::current_version()));
         ui.label(t.update_check_days);
-        ui.add(
-            egui::Slider::new(&mut self.settings.update_check_days, 0..=90)
-                .suffix(t.days_suffix)
-                .clamping(egui::SliderClamping::Always),
-        );
-        self.show_update_controls(ui);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Slider::new(&mut self.settings.update_check_days, 0..=90)
+                    .suffix(t.days_suffix)
+                    .clamping(egui::SliderClamping::Always),
+            );
+            self.show_update_controls(ui);
+        });
         ui.separator();
         ui.label(t.shell_status(self.shell_user, self.shell_machine));
         ui.horizontal_wrapped(|ui| {
