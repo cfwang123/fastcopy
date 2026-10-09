@@ -13,16 +13,20 @@
 		var releaseDir = path.join(root, 'release');
 		var archivePath = path.join(releaseDir, archiveName);
 		var exeName = 'fastcopy.exe';
+		var dllName = 'fastcopy_shell.dll';
 		var builtExe = path.join(root, 'target', 'release', exeName);
+		var builtDll = path.join(root, 'target', 'release', dllName);
 		var sevenZip = find7z();
 		mkdirp(releaseDir);
 		tryKill(exeName);
 		runCmd('cargo', ['build', '--release'], root);
 		if (!fs.existsSync(builtExe))
 			fail('missing ' + builtExe);
+		if (!fs.existsSync(builtDll))
+			fail('missing ' + builtDll);
 		if (fs.existsSync(archivePath))
 			fs.unlinkSync(archivePath);
-		runCmd(sevenZip, ['a', '-t7z', '-mx=9', archivePath, exeName], path.join(root, 'target', 'release'));
+		runCmd(sevenZip, ['a', '-t7z', '-mx=9', archivePath, exeName, dllName], path.join(root, 'target', 'release'));
 		if (!fs.existsSync(archivePath))
 			fail('archive not created: ' + archivePath);
 		console.log(archivePath);
